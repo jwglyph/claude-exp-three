@@ -136,18 +136,25 @@ class TradingAgent:
         """Process a single tick through the pipeline."""
         self._tick_count += 1
 
-        # Update execution engine price
+        # Update execution engine with price + bid/ask
         if isinstance(self.execution, SimulatedExecution):
             self.execution.update_price(tick.price)
 
         # Aggregate into candles
         completed = self.aggregator.process_tick(tick)
 
-        # Check stops on every tick for real-time risk management
-        if self._position and isinstance(self.execution, SimulatedExecution):
-            trade = self.execution.check_stops(tick.price)
+        # Check stops AND pending limit orders on every tick
+        if isinstance(self.execution, SimulatedExecution):
+            trade = self.execution.check_stops_and_limits(tick.price)
             if trade:
-                await self._on_trade_closed(trade, "stop_or_target")
+                await self._on_trade_closed(trade, trade.exit_reason or "stop_or_target")
+            # Also check if we got filled on a pending entry limit order
+            if self._position is None and self.execution.has_position:
+                pos = await self.execution.get_position()
+                if pos:
+                    self._position = pos
+                    self._candles_since_entry = 0
+                    self._trade_count += 1
 
         # Update position P&L on every tick
         if self._position:
@@ -266,24 +273,43 @@ class TradingAgent:
         )
 
     async def _enter_position(self, signal: Signal, size: int) -> None:
-        """Enter a new position."""
-        order = create_order(
+        """Enter a new position using LIMIT orders to minimize slippage.
+
+        For longs: place limit at current ask (or signal entry price)
+        For shorts: place limit at current bid (or signal entry price)
+        Limit orders fill at our price or better = zero slippage.
+        """
+        # Cancel any existing pending orders first
+        if isinstance(self.execution, SimulatedExecution):
+            await self.execution.cancel_all_pending()
+
+        # Use limit order at the signal's entry price (which is the candle close)
+        # Add 1 tick buffer to increase fill probability
+        tick = self.config.tick_size
+        if signal.side == Side.LONG:
+            limit_price = signal.entry_price + tick  # willing to pay 1 tick above close
+        else:
+            limit_price = signal.entry_price - tick  # willing to sell 1 tick below close
+
+        # Entry order: LIMIT
+        entry_order = create_order(
             symbol=self.config.symbol,
             side=signal.side,
             quantity=size,
-            order_type=OrderType.MARKET,
-            price=signal.target_price,
+            order_type=OrderType.LIMIT,
+            price=limit_price,
             stop_price=signal.stop_price,
         )
 
-        filled = await self.execution.submit_order(order)
+        filled = await self.execution.submit_order(entry_order)
 
         if filled.status.value == "filled":
+            # Immediate fill
             self._position = Position(
                 symbol=self.config.symbol,
                 side=signal.side,
                 quantity=size,
-                entry_price=filled.fill_price or signal.entry_price,
+                entry_price=filled.fill_price,
                 entry_time=time.time(),
                 stop_price=signal.stop_price,
                 target_price=signal.target_price,
@@ -291,6 +317,7 @@ class TradingAgent:
             )
             self._candles_since_entry = 0
             self._trade_count += 1
+            self._place_exit_orders(signal, size)
 
             logger.info(
                 "trade_entered",
@@ -299,10 +326,51 @@ class TradingAgent:
                 stop=signal.stop_price,
                 target=signal.target_price,
                 size=size,
+                order_type="LIMIT",
                 confidence=round(signal.confidence, 3),
                 regime=signal.regime.value,
-                reasons=signal.reasons[:3],
             )
+        else:
+            # Pending - will be checked on future ticks
+            # Store signal info for when it fills
+            self._pending_signal = signal
+            self._pending_size = size
+            logger.info(
+                "limit_order_pending",
+                side=signal.side.value,
+                limit=limit_price,
+                stop=signal.stop_price,
+                target=signal.target_price,
+            )
+
+    def _place_exit_orders(self, signal: Signal, size: int) -> None:
+        """Place stop-loss and take-profit orders after entry."""
+        # Stop loss: use STOP order (will have 1 tick slippage in sim)
+        stop_side = Side.SHORT if signal.side == Side.LONG else Side.LONG
+        stop_order = create_order(
+            symbol=self.config.symbol,
+            side=stop_side,
+            quantity=size,
+            order_type=OrderType.STOP,
+            stop_price=signal.stop_price,
+        )
+
+        # Take profit: use LIMIT order (fills at target, no slippage)
+        target_order = create_order(
+            symbol=self.config.symbol,
+            side=stop_side,
+            quantity=size,
+            order_type=OrderType.LIMIT,
+            price=signal.target_price,
+        )
+
+        # Submit both (fire and forget in sim)
+        asyncio.get_event_loop().create_task(
+            self.execution.submit_order(stop_order)
+        )
+        asyncio.get_event_loop().create_task(
+            self.execution.submit_order(target_order)
+        )
 
     def _manage_position(
         self,
@@ -348,11 +416,18 @@ class TradingAgent:
                 )
 
     async def _exit_position(self, reason: str) -> None:
-        """Exit current position."""
+        """Exit current position.
+
+        Uses market order for emergency exits (risk limit, flatten time).
+        Uses flatten (market) for other exits since we need to get out NOW.
+        Stop/target exits are already handled by pending orders.
+        """
         if not self._position:
             return
 
         if isinstance(self.execution, SimulatedExecution):
+            # Cancel any pending exit orders first (we're overriding them)
+            await self.execution.cancel_all_pending()
             trade = await self.execution.flatten()
             if trade:
                 trade.exit_reason = reason
@@ -364,7 +439,7 @@ class TradingAgent:
                 symbol=self.config.symbol,
                 side=exit_side,
                 quantity=self._position.quantity,
-                order_type=OrderType.MARKET,
+                order_type=OrderType.MARKET,  # emergency = market
             )
             await self.execution.submit_order(order)
 
