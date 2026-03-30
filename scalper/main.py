@@ -93,157 +93,152 @@ def trade(
         if not username or not api_key:
             click.echo("ERROR: --username and --api-key required for TopstepX feed")
             click.echo("  Set NQ_SCALPER_USERNAME and NQ_SCALPER_API_KEY env vars, or pass as args")
-            click.echo("  Get API access at https://dashboard.projectx.com (Subscriptions > API Access)")
             sys.exit(1)
-
-        feed, execution, client, contract = _setup_topstepx(config, username, api_key, paper, environment)
     elif feed_type == "sim":
-        feed = SimulatedFeed(symbol=config.symbol, start_price=20000.0, volatility=0.5, tick_rate=0.01)
-        execution = SimulatedExecution(config, slippage_ticks=1)
-        client, contract = None, None
+        pass
     else:
-        feed = WebSocketFeed(
-            symbol=config.symbol, url=config.feed_url,
-            api_key=api_key, provider=feed_type,
-        )
-        execution = SimulatedExecution(config, slippage_ticks=1) if paper else LiveExecution(config)
-        client, contract = None, None
+        click.echo(f"ERROR: feed type '{feed_type}' not fully supported yet")
+        sys.exit(1)
 
-    agent = TradingAgent(config, feed, execution)
+    # Everything runs in ONE event loop to avoid session/loop mismatch
+    async def run_all():
+        from scalper.feeds.projectx_client import ProjectXClient, ProjectXConfig, get_urls
+        from scalper.feeds.projectx_feed import ProjectXFeed
+        from scalper.dashboard import LiveDashboard
+        from rich.live import Live
+        from rich.console import Console
 
-    # Preload historical candles so the agent can trade immediately (no 50-min warmup)
-    if client and contract:
-        click.echo("Loading historical candles for instant warmup...")
-        try:
-            # Close stale session from setup loop, create fresh one in new loop
-            import asyncio as _aio
-            _preload_loop = _aio.new_event_loop()
-            _aio.set_event_loop(_preload_loop)
-            # Reset client session so it creates a new one in this loop
-            client._session = None
-            history = _preload_loop.run_until_complete(
-                client.get_recent_bars(contract.id, count=config.warmup_candles + 20, unit=2, unit_number=1)
-            )
-            _preload_loop.run_until_complete(client.close())
-            _preload_loop.close()
-            # Reset again for the main loop
-            client._session = None
+        nonlocal feed_type
 
-            if history:
-                agent.preload_candles(history)
-                click.echo(f"Preloaded {len(history)} candles - ready to trade!")
-            else:
-                click.echo("No historical bars (market closed?). Warming up from live data.")
-        except Exception as e:
-            click.echo(f"Could not preload: {e}. Warming up from live data.")
+        if feed_type == "topstepx":
+            # 1. Authenticate
+            api_url, market_hub, user_hub = get_urls(environment)
+            click.echo(f"Connecting to TopstepX ({environment.upper()})...")
+            px_config = ProjectXConfig(username=username, api_key=api_key,
+                                       api_url=api_url, market_hub_url=market_hub, user_hub_url=user_hub)
+            client = ProjectXClient(px_config)
+            await client.authenticate()
+            click.echo("Authenticated!")
 
-    # Fetch account info for display
-    account_info = f"PAPER MODE | {config.account_size.value} | Max {config.max_contracts} contracts"
-    if client:
-        try:
-            _acc_loop = asyncio.new_event_loop()
-            client._session = None
-            session = _acc_loop.run_until_complete(client._ensure_session())
-            url = f"{client.config.api_url}/api/Account/search"
-            import aiohttp
-            async def _fetch_accounts():
+            # 2. Find NQ contract
+            contract = await client.find_active_nq_contract()
+            click.echo(f"Contract: {contract.id} ({contract.description})")
+
+            # 3. Fetch accounts
+            account_info = "PAPER (simulated execution)"
+            try:
+                session = await client._ensure_session()
+                url = f"{client.config.api_url}/api/Account/search"
                 async with session.post(url, json={"onlyActive": True}, headers=client._auth_headers()) as resp:
-                    return await resp.json()
-            data = _acc_loop.run_until_complete(_fetch_accounts())
-            _acc_loop.run_until_complete(client.close())
-            client._session = None
-            _acc_loop.close()
+                    accs = await resp.json()
+                if isinstance(accs, list) and accs:
+                    names = [a.get("name", "?") for a in accs[:5]]
+                    account_info = "PAPER | Your accounts: " + ", ".join(names)
+                    if len(accs) > 5:
+                        account_info += f" (+{len(accs)-5} more)"
+                    click.echo(f"Found {len(accs)} accounts")
+            except Exception as e:
+                click.echo(f"Account fetch: {e}")
 
-            if isinstance(data, list) and data:
-                # Show first few account names
-                names = [f"{a.get('name', 'N/A')}" for a in data[:3]]
-                account_info = f"PAPER | Accounts: {', '.join(names)} (+{len(data)-3} more)" if len(data) > 3 else f"PAPER | Accounts: {', '.join(names)}"
-        except Exception:
+            if not paper:
+                account_info = account_info.replace("PAPER", "LIVE")
+
+            # 4. Preload historical candles
+            click.echo("Loading historical candles...")
+            try:
+                history = await client.get_recent_bars(
+                    contract.id, count=config.warmup_candles + 20, unit=2, unit_number=1
+                )
+                click.echo(f"Got {len(history)} candles")
+            except Exception as e:
+                click.echo(f"History failed: {e}")
+                history = []
+
+            # 5. Create feed and execution
+            feed = ProjectXFeed(client=client, contract_id=contract.id,
+                                subscribe_quotes=True, subscribe_trades=True)
+            if paper:
+                execution = SimulatedExecution(config, slippage_ticks=1)
+            else:
+                execution = LiveExecution(config)
+
+        else:
+            # Sim mode
+            feed = SimulatedFeed(symbol=config.symbol, start_price=20000.0, volatility=0.5, tick_rate=0.01)
+            execution = SimulatedExecution(config, slippage_ticks=1)
+            history = []
+            account_info = "SIMULATED"
+
+        # 6. Create agent and preload
+        agent = TradingAgent(config, feed, execution)
+        if history:
+            agent.preload_candles(history)
+            click.echo(f"Preloaded {len(history)} candles - ready!")
+
+        # 7. Connect feed (with logging visible so user sees connection status)
+        click.echo("Connecting to live feed...")
+        await feed.connect()
+
+        # Wait for first tick
+        click.echo("Waiting for market data...")
+        import queue as _q
+        for _ in range(100):  # 10 sec timeout
+            stats = getattr(feed, 'stats', {})
+            if isinstance(stats, dict) and stats.get('quotes', 0) > 0:
+                click.echo(f"Live data flowing! Price: {stats.get('last_price', 0):,.2f}")
+                break
+            await asyncio.sleep(0.1)
+        else:
+            click.echo("Warning: no market data yet (market may be closed)")
+
+        # 8. Suppress logs and start dashboard
+        _configure_logging("CRITICAL")
+
+        console = Console()
+        feed_stats_fn = lambda: getattr(feed, 'stats', {})
+        dashboard = LiveDashboard(agent, feed_stats_fn, account_info=account_info)
+
+        # Start agent processing (feed is already connected)
+        agent._running = True
+        agent._start_time = __import__('time').time()
+
+        async def agent_loop():
+            try:
+                async for tick in feed.stream():
+                    if not agent._running:
+                        break
+                    await agent._process_tick(tick)
+            except (asyncio.CancelledError, KeyboardInterrupt):
+                pass
+            except Exception:
+                pass
+
+        agent_task = asyncio.ensure_future(agent_loop())
+
+        try:
+            with Live(dashboard.render(), refresh_per_second=4, console=console, screen=False) as live:
+                while agent._running:
+                    await asyncio.sleep(0.25)
+                    try:
+                        live.update(dashboard.render())
+                    except Exception:
+                        pass
+        except KeyboardInterrupt:
             pass
-
-    # Suppress ALL log output during dashboard mode
-    _configure_logging("CRITICAL")
-
-    from scalper.dashboard import LiveDashboard
-    from rich.live import Live
-    from rich.console import Console
-
-    console = Console()
-    feed_stats_fn = lambda: getattr(feed, 'stats', {})
-    dashboard = LiveDashboard(agent, feed_stats_fn, account_info=account_info)
-
-    async def run_with_dashboard():
-        agent_task = asyncio.ensure_future(agent.run())
-
-        with Live(dashboard.render(), refresh_per_second=4, console=console, screen=False) as live:
-            while agent._running:
-                await asyncio.sleep(0.25)
-                try:
-                    live.update(dashboard.render())
-                except Exception:
-                    pass
-
-        await agent_task
+        finally:
+            agent._running = False
+            feed._running = False
+            agent_task.cancel()
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(run_with_dashboard())
+        loop.run_until_complete(run_all())
     except KeyboardInterrupt:
         pass
     finally:
-        agent._running = False
-        feed._running = False
-        try:
-            loop.run_until_complete(agent._shutdown())
-        except Exception:
-            pass
         loop.close()
         os._exit(0)
-
-
-def _setup_topstepx(config, username, api_key, paper, environment="live"):
-    """Set up TopstepX/ProjectX feed and execution. Returns (feed, execution, client, contract)."""
-    from scalper.feeds.projectx_client import ProjectXClient, ProjectXConfig, get_urls
-    from scalper.feeds.projectx_feed import ProjectXFeed
-
-    api_url, market_hub, user_hub = get_urls(environment)
-    click.echo(f"Environment: {environment.upper()} ({api_url})")
-
-    px_config = ProjectXConfig(
-        username=username,
-        api_key=api_key,
-        api_url=api_url,
-        market_hub_url=market_hub,
-        user_hub_url=user_hub,
-    )
-    client = ProjectXClient(px_config)
-
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(client.authenticate())
-        contract = loop.run_until_complete(client.find_active_nq_contract())
-        loop.run_until_complete(client.close())
-        client._session = None  # Will create fresh session in next loop
-    finally:
-        loop.close()
-
-    click.echo(f"Contract: {contract.id} ({contract.description})")
-    click.echo(f"Tick: {contract.tick_size} / ${contract.tick_value}")
-
-    feed = ProjectXFeed(
-        client=client,
-        contract_id=contract.id,
-        subscribe_quotes=True,
-        subscribe_trades=True,
-    )
-
-    if paper:
-        execution = SimulatedExecution(config, slippage_ticks=1)
-    else:
-        execution = LiveExecution(config)
-
-    return feed, execution, client, contract
 
 
 @cli.command()
