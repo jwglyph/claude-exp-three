@@ -38,6 +38,7 @@ def cli():
 
 @cli.command()
 @click.option("--feed-type", default="topstepx", type=click.Choice(["topstepx", "rithmic", "tradovate", "sim"]))
+@click.option("--env", "environment", default="live", type=click.Choice(["live", "demo"]), help="TopstepX environment (demo = free with eval account)")
 @click.option("--username", default=None, help="TopstepX/ProjectX username (or NQ_SCALPER_USERNAME env)")
 @click.option("--api-key", default=None, help="TopstepX/ProjectX API key (or NQ_SCALPER_API_KEY env)")
 @click.option("--account-size", default="50k", type=click.Choice(["50k", "100k", "150k"]))
@@ -47,6 +48,7 @@ def cli():
 @click.option("--log-level", default="INFO", type=click.Choice(["DEBUG", "INFO", "WARNING"]))
 def trade(
     feed_type: str,
+    environment: str,
     username: str,
     api_key: str,
     account_size: str,
@@ -75,7 +77,7 @@ def trade(
             click.echo("  Get API access at https://dashboard.projectx.com (Subscriptions > API Access)")
             sys.exit(1)
 
-        feed, execution = _setup_topstepx(config, username, api_key, paper)
+        feed, execution = _setup_topstepx(config, username, api_key, paper, environment)
     elif feed_type == "sim":
         feed = SimulatedFeed(symbol=config.symbol, start_price=20000.0, volatility=0.5, tick_rate=0.01)
         execution = SimulatedExecution(config, slippage_ticks=1)
@@ -116,12 +118,21 @@ def trade(
         loop.close()
 
 
-def _setup_topstepx(config, username, api_key, paper):
+def _setup_topstepx(config, username, api_key, paper, environment="live"):
     """Set up TopstepX/ProjectX feed and execution."""
-    from scalper.feeds.projectx_client import ProjectXClient, ProjectXConfig
+    from scalper.feeds.projectx_client import ProjectXClient, ProjectXConfig, get_urls
     from scalper.feeds.projectx_feed import ProjectXFeed
 
-    px_config = ProjectXConfig(username=username, api_key=api_key)
+    api_url, market_hub, user_hub = get_urls(environment)
+    click.echo(f"Environment: {environment.upper()} ({api_url})")
+
+    px_config = ProjectXConfig(
+        username=username,
+        api_key=api_key,
+        api_url=api_url,
+        market_hub_url=market_hub,
+        user_hub_url=user_hub,
+    )
     client = ProjectXClient(px_config)
 
     # We need to authenticate and find the NQ contract synchronously for setup
@@ -153,6 +164,7 @@ def _setup_topstepx(config, username, api_key, paper):
 @cli.command()
 @click.option("--username", required=True, help="TopstepX username")
 @click.option("--api-key", required=True, help="TopstepX API key")
+@click.option("--env", "environment", default="live", type=click.Choice(["live", "demo"]))
 @click.option("--bars", default=500, type=int, help="Number of 1-min bars to fetch")
 @click.option("--account-size", default="50k", type=click.Choice(["50k", "100k", "150k"]))
 @click.option("--max-contracts", default=2, type=int)
@@ -161,6 +173,7 @@ def _setup_topstepx(config, username, api_key, paper):
 def backtest_live(
     username: str,
     api_key: str,
+    environment: str,
     bars: int,
     account_size: str,
     max_contracts: int,
@@ -168,7 +181,7 @@ def backtest_live(
     output: str,
 ):
     """Fetch REAL historical NQ bars from TopstepX and run backtest."""
-    from scalper.feeds.projectx_client import ProjectXClient, ProjectXConfig
+    from scalper.feeds.projectx_client import ProjectXClient, ProjectXConfig, get_urls
 
     config = ScalperConfig(
         account_size=AccountSize(account_size),
@@ -176,10 +189,11 @@ def backtest_live(
         daily_loss_limit=daily_loss_limit,
     )
 
-    px_config = ProjectXConfig(username=username, api_key=api_key)
+    api_url, market_hub, user_hub = get_urls(environment)
+    px_config = ProjectXConfig(username=username, api_key=api_key, api_url=api_url, market_hub_url=market_hub, user_hub_url=user_hub)
     client = ProjectXClient(px_config)
 
-    click.echo("Connecting to TopstepX API...")
+    click.echo(f"Connecting to TopstepX API ({environment.upper()})...")
 
     loop = asyncio.new_event_loop()
     try:
@@ -291,13 +305,15 @@ def backtest(
 @cli.command()
 @click.option("--username", required=True, help="TopstepX username")
 @click.option("--api-key", required=True, help="TopstepX API key")
+@click.option("--env", "environment", default="live", type=click.Choice(["live", "demo"]))
 @click.option("--bars", default=200, type=int, help="Number of 1-min bars to fetch")
 @click.option("--save", default=None, type=click.Path(), help="Save bars to JSON file")
-def fetch_data(username: str, api_key: str, bars: int, save: str):
+def fetch_data(username: str, api_key: str, environment: str, bars: int, save: str):
     """Fetch real NQ historical bars from TopstepX and optionally save to file."""
-    from scalper.feeds.projectx_client import ProjectXClient, ProjectXConfig
+    from scalper.feeds.projectx_client import ProjectXClient, ProjectXConfig, get_urls
 
-    px_config = ProjectXConfig(username=username, api_key=api_key)
+    api_url, market_hub, user_hub = get_urls(environment)
+    px_config = ProjectXConfig(username=username, api_key=api_key, api_url=api_url, market_hub_url=market_hub, user_hub_url=user_hub)
     client = ProjectXClient(px_config)
 
     async def run():

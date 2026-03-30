@@ -22,15 +22,37 @@ logger = structlog.get_logger()
 
 
 # --- Connection URLs ---
-# TopstepX / ProjectX endpoints
+# TopstepX / ProjectX LIVE endpoints
 TOPSTEPX_API_URL = "https://api.topstepx.com"
 TOPSTEPX_MARKET_HUB = "https://rtc.topstepx.com/hubs/market"
 TOPSTEPX_USER_HUB = "https://rtc.topstepx.com/hubs/user"
+
+# TopstepX / ProjectX DEMO endpoints (free with eval account)
+DEMO_API_URL = "https://gateway-api-demo.s2f.projectx.com"
+DEMO_MARKET_HUB = "https://gateway-rtc-demo.s2f.projectx.com/hubs/market"
+DEMO_USER_HUB = "https://gateway-rtc-demo.s2f.projectx.com/hubs/user"
 
 # The Futures Desk (alternative/legacy)
 TFD_API_URL = "https://api.thefuturesdesk.projectx.com"
 TFD_MARKET_HUB = "https://rtc.thefuturesdesk.projectx.com/hubs/market"
 TFD_USER_HUB = "https://rtc.thefuturesdesk.projectx.com/hubs/user"
+
+
+def get_urls(environment: str = "live") -> tuple[str, str, str]:
+    """Get API URLs for the given environment.
+
+    Args:
+        environment: "live", "demo", or "tfd" (The Futures Desk)
+
+    Returns:
+        (api_url, market_hub_url, user_hub_url)
+    """
+    if environment == "demo":
+        return DEMO_API_URL, DEMO_MARKET_HUB, DEMO_USER_HUB
+    elif environment == "tfd":
+        return TFD_API_URL, TFD_MARKET_HUB, TFD_USER_HUB
+    else:
+        return TOPSTEPX_API_URL, TOPSTEPX_MARKET_HUB, TOPSTEPX_USER_HUB
 
 
 @dataclass
