@@ -7,12 +7,15 @@ The Market Hub supports:
 - SubscribeContractQuotes(contractId) -> GatewayQuote events
 - SubscribeContractTrades(contractId) -> GatewayTrade events
 - SubscribeContractMarketDepth(contractId) -> GatewayDepth events
+
+SignalR events arrive as: [contractId, {data_dict}]
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import queue
 import time
 import threading
 from typing import AsyncIterator, Callable, Optional
@@ -50,7 +53,8 @@ class ProjectXFeed(PriceFeed):
         self._subscribe_depth = subscribe_depth
 
         self._hub: Optional[object] = None
-        self._tick_queue: asyncio.Queue[Tick] = asyncio.Queue(maxsize=10000)
+        # Use thread-safe queue since SignalR callbacks run in a separate thread
+        self._tick_queue: queue.Queue = queue.Queue(maxsize=10000)
         self._connected = False
         self._reconnect_delay = 2.0
         self._last_price = 0.0
@@ -59,10 +63,8 @@ class ProjectXFeed(PriceFeed):
 
     async def connect(self) -> None:
         """Authenticate and connect to SignalR Market Hub."""
-        # Ensure we have a valid token
         token = await self.client.ensure_authenticated()
 
-        # Build SignalR connection to Market Hub
         market_hub_url = self.client.config.market_hub_url
         hub_url_with_token = f"{market_hub_url}?access_token={token}"
 
@@ -72,7 +74,6 @@ class ProjectXFeed(PriceFeed):
             contract=self.contract_id,
         )
 
-        # signalrcore uses sync callbacks, we bridge to async via queue
         self._hub = (
             HubConnectionBuilder()
             .with_url(hub_url_with_token, options={
@@ -124,17 +125,16 @@ class ProjectXFeed(PriceFeed):
         logger.info("market_hub_disconnected")
 
     async def stream(self) -> AsyncIterator[Tick]:
-        """Stream ticks from the SignalR event queue."""
+        """Stream ticks from the thread-safe queue."""
         while self._running:
             try:
-                # Wait for ticks with timeout to allow checking _running flag
-                tick = await asyncio.wait_for(
-                    self._tick_queue.get(), timeout=1.0
-                )
+                # Poll the thread-safe queue from the async loop
+                tick = self._tick_queue.get_nowait()
                 self._emit(tick)
                 yield tick
-            except asyncio.TimeoutError:
-                continue
+            except queue.Empty:
+                # No ticks available, yield control briefly
+                await asyncio.sleep(0.01)
             except Exception as e:
                 logger.warning("stream_error", error=str(e))
                 if not self._running:
@@ -160,58 +160,77 @@ class ProjectXFeed(PriceFeed):
 
     # --- SignalR event handlers (called from signalrcore thread) ---
 
+    def _extract_data(self, args) -> Optional[dict]:
+        """Extract the data dict from SignalR event args.
+
+        SignalR events arrive as: [contractId_string, {data_dict}]
+        e.g.: ['CON.F.US.ENQ.M26', {'bestBid': 23121.0, 'bestAsk': 23121.75, ...}]
+        """
+        if isinstance(args, list):
+            # Find the dict in the args list (skip the contract ID string)
+            for item in args:
+                if isinstance(item, dict):
+                    return item
+            # If args is a list of one dict
+            if len(args) == 1 and isinstance(args[0], dict):
+                return args[0]
+            # Maybe it's a list of lists
+            for item in args:
+                if isinstance(item, list):
+                    for sub in item:
+                        if isinstance(sub, dict):
+                            return sub
+        elif isinstance(args, dict):
+            return args
+        elif isinstance(args, str):
+            try:
+                return json.loads(args)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        return None
+
     def _on_connected(self) -> None:
-        """Called when SignalR connection opens."""
         self._connected = True
         logger.info("market_hub_connected")
         self._subscribe_all()
 
     def _on_disconnected(self) -> None:
-        """Called when connection closes."""
         self._connected = False
         logger.warning("market_hub_disconnected")
 
     def _on_reconnect(self) -> None:
-        """Called on reconnection - must resubscribe."""
         logger.info("market_hub_reconnected")
         self._connected = True
         self._subscribe_all()
 
     def _on_error(self, error) -> None:
-        """Called on connection error."""
         logger.error("market_hub_error", error=str(error))
 
     def _on_quote(self, args) -> None:
         """Handle GatewayQuote event.
 
-        Quote data typically contains:
-        - lastPrice, bestBid, bestAsk
-        - change, changePercent
-        - open, high, low
-        - session data
+        Data contains: bestBid, bestAsk, lastPrice, change, changePercent,
+        timestamp, lastUpdated, symbol, contract
         """
         try:
-            data = args[0] if isinstance(args, list) else args
-            if isinstance(data, str):
-                data = json.loads(data)
+            data = self._extract_data(args)
+            if data is None:
+                logger.debug("quote_no_data", raw=str(args)[:200])
+                return
 
-            price = float(
-                data.get("lastPrice")
-                or data.get("bestBid")
-                or data.get("price")
-                or 0
-            )
+            # Get price - prefer lastPrice, fall back to mid of bid/ask
+            bid = float(data.get("bestBid", 0) or 0)
+            ask = float(data.get("bestAsk", 0) or 0)
+            last = float(data.get("lastPrice", 0) or 0)
 
+            price = last if last > 0 else (bid + ask) / 2 if (bid > 0 and ask > 0) else bid or ask
             if price <= 0:
                 return
 
             self._last_price = price
             self._quote_count += 1
 
-            # Get bid/ask for side inference
-            bid = float(data.get("bestBid", 0) or 0)
-            ask = float(data.get("bestAsk", 0) or 0)
-
+            # Infer side from price vs bid/ask
             side = ""
             if bid > 0 and ask > 0:
                 if price >= ask:
@@ -226,30 +245,38 @@ class ProjectXFeed(PriceFeed):
                 side=side,
             )
 
-            # Non-blocking put to queue
+            # Thread-safe put
             try:
                 self._tick_queue.put_nowait(tick)
-            except asyncio.QueueFull:
-                # Drop oldest if queue full (shouldn't happen in practice)
+            except queue.Full:
                 try:
-                    self._tick_queue.get_nowait()
+                    self._tick_queue.get_nowait()  # drop oldest
                     self._tick_queue.put_nowait(tick)
                 except Exception:
                     pass
 
+            if self._quote_count % 100 == 1:
+                logger.info(
+                    "quote_received",
+                    price=price,
+                    bid=bid,
+                    ask=ask,
+                    count=self._quote_count,
+                )
+
         except Exception as e:
-            logger.debug("quote_parse_error", error=str(e), raw=str(args)[:200])
+            logger.debug("quote_parse_error", error=str(e), raw=str(args)[:300])
 
     def _on_trade(self, args) -> None:
         """Handle GatewayTrade event.
 
-        Trade data contains:
-        - symbolId, price, timestamp, type, volume
+        Data contains: symbolId, price, timestamp, type, volume, contractId
         """
         try:
-            data = args[0] if isinstance(args, list) else args
-            if isinstance(data, str):
-                data = json.loads(data)
+            data = self._extract_data(args)
+            if data is None:
+                logger.debug("trade_no_data", raw=str(args)[:200])
+                return
 
             price = float(data.get("price", 0))
             if price <= 0:
@@ -274,50 +301,55 @@ class ProjectXFeed(PriceFeed):
 
             try:
                 self._tick_queue.put_nowait(tick)
-            except asyncio.QueueFull:
+            except queue.Full:
                 try:
                     self._tick_queue.get_nowait()
                     self._tick_queue.put_nowait(tick)
                 except Exception:
                     pass
 
+            if self._trade_count % 100 == 1:
+                logger.info(
+                    "trade_received",
+                    price=price,
+                    volume=tick.size,
+                    side=side,
+                    count=self._trade_count,
+                )
+
         except Exception as e:
-            logger.debug("trade_parse_error", error=str(e), raw=str(args)[:200])
+            logger.debug("trade_parse_error", error=str(e), raw=str(args)[:300])
 
     def _on_depth(self, args) -> None:
-        """Handle GatewayDepth event (DOM updates). Currently just logged."""
-        pass  # Can be extended for order flow analysis
+        """Handle GatewayDepth event (DOM updates)."""
+        pass
 
     def _parse_timestamp(self, data: dict) -> float:
         """Parse timestamp from various formats."""
         ts = data.get("timestamp", data.get("t", ""))
         if isinstance(ts, (int, float)):
-            # Could be epoch seconds or milliseconds
             return ts / 1000 if ts > 1e12 else ts
         if isinstance(ts, str) and ts:
             try:
                 from datetime import datetime
-                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                # Handle ISO format with timezone
+                clean = ts.replace("Z", "+00:00")
+                # Handle +00:00 already present
+                dt = datetime.fromisoformat(clean)
                 return dt.timestamp()
             except (ValueError, TypeError):
                 pass
         return time.time()
 
     async def update_token(self) -> None:
-        """Refresh the auth token and reconnect if needed.
-
-        Call this periodically for long-running sessions (tokens expire in 24h).
-        """
+        """Refresh the auth token and reconnect if needed."""
         try:
             new_token = await self.client.authenticate()
             logger.info("token_refreshed")
-
-            # Reconnect with new token
             if self._hub:
                 await self.disconnect()
                 await asyncio.sleep(1)
                 await self.connect()
-
         except Exception as e:
             logger.error("token_refresh_failed", error=str(e))
 
