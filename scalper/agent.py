@@ -97,6 +97,13 @@ class TradingAgent:
         for c in candles:
             self.aggregator.process_candle(c)
         self._candle_count = len(candles)
+
+        # Compute indicators on preloaded data so dashboard shows values immediately
+        all_candles = self.aggregator.get_candles()
+        if len(all_candles) >= 2:
+            self._current_indicators = self.indicators.compute(all_candles)
+            self._current_regime = self.regime_detector.detect(all_candles, self._current_indicators)
+
         logger.info("preloaded_candles", count=len(candles))
 
     async def run(self) -> None:

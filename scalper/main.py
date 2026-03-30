@@ -20,7 +20,17 @@ import logging
 
 def _configure_logging(level: str = "INFO") -> None:
     """Configure structlog with proper level filtering."""
-    logging.basicConfig(level=getattr(logging, level, logging.INFO), format="%(message)s")
+    numeric = getattr(logging, level, logging.INFO)
+    # Reset root logger
+    root = logging.getLogger()
+    root.setLevel(numeric)
+    # Clear existing handlers and add one
+    root.handlers.clear()
+    handler = logging.StreamHandler()
+    handler.setLevel(numeric)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    root.addHandler(handler)
+
     structlog.configure(
         processors=[
             structlog.stdlib.filter_by_level,
@@ -127,8 +137,8 @@ def trade(
         except Exception as e:
             click.echo(f"Could not preload: {e}. Warming up from live data.")
 
-    # Suppress log output during dashboard mode - dashboard shows everything
-    _configure_logging("WARNING")
+    # Suppress ALL log output during dashboard mode - dashboard shows everything
+    _configure_logging("CRITICAL")
 
     # Run with live dashboard
     from scalper.dashboard import LiveDashboard
