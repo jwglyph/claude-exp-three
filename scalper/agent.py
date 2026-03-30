@@ -114,11 +114,10 @@ class TradingAgent:
 
                 await self._process_tick(tick)
 
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, KeyboardInterrupt):
             logger.info("agent_cancelled")
         except Exception as e:
             logger.error("agent_error", error=str(e))
-            raise
         finally:
             await self._shutdown()
 

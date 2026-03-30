@@ -16,16 +16,24 @@ from scalper.agent import TradingAgent
 from scalper.feeds.price_feed import WebSocketFeed, SimulatedFeed, CandleReplayFeed
 from scalper.execution.engine import SimulatedExecution, LiveExecution
 
-structlog.configure(
-    processors=[
-        structlog.stdlib.add_log_level,
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.dev.ConsoleRenderer(colors=True),
-    ],
-    wrapper_class=structlog.stdlib.BoundLogger,
-    context_class=dict,
-    logger_factory=structlog.PrintLoggerFactory(),
-)
+import logging
+
+def _configure_logging(level: str = "INFO") -> None:
+    """Configure structlog with proper level filtering."""
+    logging.basicConfig(level=getattr(logging, level, logging.INFO), format="%(message)s")
+    structlog.configure(
+        processors=[
+            structlog.stdlib.filter_by_level,
+            structlog.stdlib.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.dev.ConsoleRenderer(colors=True),
+        ],
+        wrapper_class=structlog.stdlib.BoundLogger,
+        context_class=dict,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+    )
+
+_configure_logging("INFO")
 
 logger = structlog.get_logger()
 
@@ -58,6 +66,7 @@ def trade(
     log_level: str,
 ):
     """Start live trading with real market data from TopstepX."""
+    _configure_logging(log_level)
     username = username or os.environ.get("NQ_SCALPER_USERNAME", "")
     api_key = api_key or os.environ.get("NQ_SCALPER_API_KEY", "")
 
@@ -95,27 +104,29 @@ def trade(
 
     agent = TradingAgent(config, feed, execution)
 
-    loop = asyncio.new_event_loop()
-
-    def shutdown_handler(sig, frame):
-        click.echo(f"\nReceived signal, shutting down gracefully...")
-        loop.create_task(agent.stop())
-
-    signal.signal(signal.SIGINT, shutdown_handler)
-    signal.signal(signal.SIGTERM, shutdown_handler)
-
     click.echo(f"NQ Adaptive Scalper | {config.symbol} | {config.account_size.value} account")
     click.echo(f"Max contracts: {config.max_contracts} | Daily loss limit: ${config.daily_loss_limit}")
     click.echo(f"Feed: {feed_type} | Execution: {'paper' if paper else 'LIVE'}")
+    click.echo("Press Ctrl+C to stop.")
     click.echo("=" * 60)
 
+    loop = asyncio.new_event_loop()
     try:
         loop.run_until_complete(agent.run())
     except KeyboardInterrupt:
-        click.echo("\nShutting down...")
-        loop.run_until_complete(agent.stop())
+        click.echo("\nCtrl+C received, shutting down...")
     finally:
+        # Stop the agent and feed
+        agent._running = False
+        feed._running = False
+        try:
+            loop.run_until_complete(agent._shutdown())
+        except Exception:
+            pass
         loop.close()
+        # Force kill any remaining SignalR threads
+        click.echo("Stopped.")
+        os._exit(0)
 
 
 def _setup_topstepx(config, username, api_key, paper, environment="live"):
