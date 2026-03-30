@@ -27,7 +27,7 @@ import structlog
 from scalper.config import ScalperConfig, TradingSession
 from scalper.models import (
     Candle, MarketRegime, Order, OrderType, Position,
-    Side, Signal, Tick, TradeResult,
+    Side, Signal, SignalType, Tick, TradeResult,
 )
 from scalper.feeds.candle_aggregator import CandleAggregator
 from scalper.feeds.price_feed import PriceFeed
@@ -39,12 +39,14 @@ from scalper.execution.engine import (
     ExecutionEngine, SimulatedExecution, create_order,
 )
 from scalper.adaptive.learner import AdaptiveLearner
+from scalper.analysis.multi_tf import MultiTimeframeEngine, HTFConfluence
+from scalper.analysis.tick_analyzer import TickAnalyzer, TickEvent
 
 logger = structlog.get_logger()
 
 
 class TradingAgent:
-    """The adaptive NQ scalping agent."""
+    """The adaptive NQ scalping agent with multi-timeframe and intra-candle analysis."""
 
     def __init__(self, config: ScalperConfig, feed: PriceFeed, execution: ExecutionEngine):
         self.config = config
@@ -76,26 +78,46 @@ class TradingAgent:
         self.risk_mgr = RiskManager(config)
         self.learner = AdaptiveLearner(config)
 
+        # Multi-timeframe engine (5m, 15m, 1h)
+        self.mtf = MultiTimeframeEngine()
+
+        # Intra-candle tick analyzer
+        self.tick_analyzer = TickAnalyzer(
+            momentum_threshold_ticks=8,   # 2 points
+            momentum_window_sec=5.0,
+            volume_spike_ratio=3.0,
+            level_proximity_ticks=2,
+            event_cooldown_sec=10.0,
+            max_events_per_candle=3,
+        )
+
         # State
         self._running = False
         self._current_indicators: Optional[IndicatorState] = None
         self._current_regime: Optional[RegimeState] = None
+        self._current_confluence: Optional[HTFConfluence] = None
         self._current_signal: Optional[Signal] = None
         self._position: Optional[Position] = None
         self._last_signal_reasons: list[str] = []
+        self._last_tick_event: Optional[TickEvent] = None
         self._candles_since_entry: int = 0
+        self._pending_signal: Optional[Signal] = None
+        self._pending_size: int = 0
 
         # Stats
         self._tick_count = 0
         self._candle_count = 0
         self._signal_count = 0
         self._trade_count = 0
+        self._intra_candle_trades = 0
         self._start_time = 0.0
 
     def preload_candles(self, candles: list[Candle]) -> None:
-        """Preload historical candles for instant warmup (no 50-min wait)."""
+        """Preload historical candles for instant warmup."""
         for c in candles:
             self.aggregator.process_candle(c)
+            # Also feed to multi-timeframe engine
+            self.mtf.process_1m_candle(c)
         self._candle_count = len(candles)
 
         # Compute indicators on preloaded data so dashboard shows values immediately
@@ -133,28 +155,50 @@ class TradingAgent:
         self._running = False
 
     async def _process_tick(self, tick: Tick) -> None:
-        """Process a single tick through the pipeline."""
+        """Process a single tick through the full pipeline.
+
+        On EVERY tick:
+        1. Update execution engine (check fills, stops)
+        2. Feed to candle aggregator
+        3. Feed to multi-timeframe engine
+        4. Run intra-candle tick analysis
+        5. If tick event detected + HTF confluence → consider immediate entry
+        6. Update position P&L and check risk exits
+        """
         self._tick_count += 1
 
-        # Update execution engine with price + bid/ask
+        # Update execution engine with price
         if isinstance(self.execution, SimulatedExecution):
             self.execution.update_price(tick.price)
 
-        # Aggregate into candles
+        # Aggregate into 1m candles
         completed = self.aggregator.process_tick(tick)
+
+        # Feed to multi-timeframe engine
+        self.mtf.process_tick(tick.timestamp, tick.price, tick.size, tick.side)
 
         # Check stops AND pending limit orders on every tick
         if isinstance(self.execution, SimulatedExecution):
             trade = self.execution.check_stops_and_limits(tick.price)
             if trade:
                 await self._on_trade_closed(trade, trade.exit_reason or "stop_or_target")
-            # Also check if we got filled on a pending entry limit order
+            # Check if pending entry limit got filled
             if self._position is None and self.execution.has_position:
                 pos = await self.execution.get_position()
                 if pos:
                     self._position = pos
                     self._candles_since_entry = 0
                     self._trade_count += 1
+                    if self._pending_signal:
+                        self._place_exit_orders(self._pending_signal, self._pending_size)
+                        self._pending_signal = None
+
+        # Intra-candle tick analysis (only when we have indicators and no position)
+        if self._current_indicators and self._current_regime and self._position is None:
+            tick_event = self.tick_analyzer.process_tick(tick, self._current_indicators)
+            if tick_event:
+                self._last_tick_event = tick_event
+                self._evaluate_intra_candle_entry(tick_event, tick)
 
         # Update position P&L on every tick
         if self._position:
@@ -168,24 +212,116 @@ class TradingAgent:
                 if should_exit:
                     await self._exit_position(reason)
 
-    def _on_candle_complete(self, candle: Candle) -> None:
-        """Called when a 1-minute candle completes. This drives all analysis."""
-        self._candle_count += 1
+    def _evaluate_intra_candle_entry(self, event: TickEvent, tick: Tick) -> None:
+        """Evaluate an intra-candle tick event for immediate entry.
 
-        candles = self.aggregator.get_candles()
-        if len(candles) < self.config.warmup_candles:
-            logger.debug("warming_up", candles=len(candles), needed=self.config.warmup_candles)
-            return
-
-        # Check session filter
+        Only enters if:
+        1. Tick event has strong direction signal
+        2. HTF confluence agrees
+        3. 1m indicators support (trend, RSI not extreme)
+        4. Risk manager allows
+        """
         if not self._is_tradeable_session():
             return
 
-        # 1. Compute indicators
+        can_trade, _ = self.risk_mgr.can_trade()
+        if not can_trade:
+            return
+
+        # Need HTF confluence
+        confluence = self.mtf.get_confluence()
+        self._current_confluence = confluence
+
+        # Determine side from event
+        if event.direction > 0:
+            side = Side.LONG
+        elif event.direction < 0:
+            side = Side.SHORT
+        else:
+            return
+
+        # Check HTF agreement
+        if confluence.agrees_with is not None and confluence.agrees_with != side:
+            return  # HTF disagrees, skip
+
+        # Check 1m indicators support
+        ind = self._current_indicators
+        if side == Side.LONG and ind.rsi > 75:
+            return  # too overbought
+        if side == Side.SHORT and ind.rsi < 25:
+            return  # too oversold
+
+        # Build confidence from event + confluence + indicators
+        base_conf = 0.45 + event.magnitude * 0.2  # 0.45-0.65 from event
+        if confluence.strength > 0.5:
+            base_conf += 0.1  # HTF boost
+        if ind.trend_direction == (1 if side == Side.LONG else -1):
+            base_conf += 0.05  # 1m trend aligned
+
+        # Must meet minimum threshold
+        adaptive_threshold = self.learner.get_confidence_threshold()
+        if base_conf < adaptive_threshold:
+            return
+
+        # Build signal
+        regime = self._current_regime
+        stop = self.risk_mgr.compute_stop(side, tick.price, ind, regime)
+        target = self.risk_mgr.compute_target(side, tick.price, stop, ind, regime)
+
+        signal = Signal(
+            timestamp=tick.timestamp,
+            signal_type=SignalType.LONG if side == Side.LONG else SignalType.SHORT,
+            confidence=base_conf,
+            side=side,
+            entry_price=tick.price,
+            stop_price=stop,
+            target_price=target,
+            regime=regime.regime,
+            reasons=[f"intra:{event.event_type}", event.description, confluence.description],
+        )
+
+        # Check R:R
+        if signal.rr_ratio < self.config.min_rr_ratio:
+            return
+
+        # Size and execute
+        size = self.risk_mgr.compute_position_size(signal, ind, regime)
+        if size <= 0:
+            return
+
+        self._signal_count += 1
+        self._intra_candle_trades += 1
+        self._last_signal_reasons = signal.reasons
+        asyncio.get_event_loop().create_task(self._enter_position(signal, size))
+
+    def _on_candle_complete(self, candle: Candle) -> None:
+        """Called when a 1-minute candle completes."""
+        self._candle_count += 1
+
+        # Feed to multi-timeframe engine
+        self.mtf.process_1m_candle(candle)
+
+        # Reset intra-candle analyzer for new candle
+        self.tick_analyzer.reset_candle()
+
+        candles = self.aggregator.get_candles()
+        if len(candles) < self.config.warmup_candles:
+            return
+
+        if not self._is_tradeable_session():
+            return
+
+        # 1. Compute 1m indicators
         self._current_indicators = self.indicators.compute(candles)
 
-        # 2. Detect regime
+        # 2. Detect 1m regime
         self._current_regime = self.regime_detector.detect(candles, self._current_indicators)
+
+        # 3. Update HTF confluence
+        self._current_confluence = self.mtf.get_confluence()
+
+        # 4. Update tick analyzer with current levels
+        self.tick_analyzer.update_levels(self._current_indicators)
 
         if isinstance(self.execution, SimulatedExecution):
             self.execution.set_regime(self._current_regime.regime)
@@ -208,13 +344,12 @@ class TradingAgent:
         indicators: IndicatorState,
         regime: RegimeState,
     ) -> None:
-        """Evaluate whether to enter a new trade."""
-        # Check if we can trade
+        """Evaluate whether to enter on candle close (with HTF confluence)."""
         can_trade, reason = self.risk_mgr.can_trade()
         if not can_trade:
             return
 
-        # Generate signal
+        # Generate 1m signal
         signal = self.signal_gen.generate(candles, indicators, regime)
         if signal is None:
             return
@@ -227,7 +362,19 @@ class TradingAgent:
         # Apply adaptive regime weight
         regime_weight = self.learner.get_regime_weight(regime.regime)
         if regime_weight < 0.5:
-            return  # Skip regimes we're performing poorly in
+            return
+
+        # HTF confluence check
+        confluence = self._current_confluence
+        if confluence:
+            if confluence.agrees_with is not None and confluence.agrees_with != signal.side:
+                # HTF disagrees - need much higher confidence to override
+                if signal.confidence < 0.80:
+                    return
+            elif confluence.agrees_with == signal.side:
+                # HTF agrees - boost confidence
+                signal.confidence = min(1.0, signal.confidence + confluence.strength * 0.1)
+                signal.reasons.append(f"htf:{confluence.description}")
 
         # Compute risk-managed stop and target
         stop = self.risk_mgr.compute_stop(
@@ -543,12 +690,39 @@ class TradingAgent:
 
     def get_status(self) -> dict:
         """Get current agent status for dashboard."""
+        # HTF info
+        confluence = self._current_confluence
+        htf = {}
+        if confluence:
+            htf = {
+                "score": round(confluence.score, 2),
+                "strength": round(confluence.strength, 2),
+                "agrees": confluence.agrees_with.value if confluence.agrees_with else "neutral",
+                "5m": confluence.tf_5m_trend,
+                "15m": confluence.tf_15m_trend,
+                "1h": confluence.tf_1h_trend,
+                "desc": confluence.description,
+            }
+
+        # Last tick event
+        tick_evt = None
+        if self._last_tick_event:
+            e = self._last_tick_event
+            tick_evt = {
+                "type": e.event_type,
+                "dir": e.direction,
+                "mag": round(e.magnitude, 2),
+                "desc": e.description,
+                "age": round(time.time() - e.timestamp, 1),
+            }
+
         return {
             "running": self._running,
             "ticks": self._tick_count,
             "candles": self._candle_count,
             "signals": self._signal_count,
             "trades": self._trade_count,
+            "intra_candle_trades": self._intra_candle_trades,
             "position": {
                 "side": self._position.side.value if self._position else None,
                 "entry": self._position.entry_price if self._position else None,
@@ -558,11 +732,13 @@ class TradingAgent:
                 "trail": self._position.trailing_stop if self._position else None,
             },
             "risk": {
-                "daily_pnl": round(self.risk_mgr.state.daily_pnl, 2),
+                "daily_pnl": round(self.risk_mgr.state.daily_pnl_net, 2),
                 "drawdown_remaining": round(self.risk_mgr.state.trailing_drawdown_remaining, 2),
                 "risk_multiplier": round(self.risk_mgr.state.risk_multiplier, 2),
                 "is_locked": self.risk_mgr.state.is_locked,
                 "consecutive_losses": self.risk_mgr.state.consecutive_losses,
+                "balance": round(self.risk_mgr.state.account_balance, 2),
+                "max_contracts": self.risk_mgr.state.max_contracts_current,
             },
             "regime": self._current_regime.regime.value if self._current_regime else "unknown",
             "indicators": {
@@ -572,5 +748,7 @@ class TradingAgent:
                 "atr": round(self._current_indicators.atr, 2) if self._current_indicators else 0,
                 "vwap": round(self._current_indicators.vwap, 2) if self._current_indicators else 0,
             },
+            "htf": htf,
+            "tick_event": tick_evt,
             "adaptive": self.learner.get_stats_summary(),
         }

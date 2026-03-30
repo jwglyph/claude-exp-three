@@ -99,7 +99,10 @@ def render_dashboard(agent: TradingAgent, feed_stats: dict, account_info: str, t
 
     # Spinner for liveness
     spin = SPINNER[tick_counter % len(SPINNER)]
-    now = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    now_utc = datetime.now(timezone.utc)
+    now = now_utc.strftime("%H:%M:%S")
+    from datetime import timedelta
+    pst = (now_utc - timedelta(hours=8)).strftime("%H:%M:%S")
 
     # Build output
     lines = []
@@ -112,7 +115,7 @@ def render_dashboard(agent: TradingAgent, feed_stats: dict, account_info: str, t
         f"  {conn_icon} [bold cyan]NQ SCALPER[/]  {price_str}  "
         f"[{rc}]{regime.upper()}[/]  "
         f"{make_mini_chart(recent_closes)}  "
-        f"[dim]{now} UTC {spin}[/]"
+        f"[dim]{pst} PST / {now} UTC {spin}[/]"
     )
 
     # ── Account ──
@@ -136,6 +139,38 @@ def render_dashboard(agent: TradingAgent, feed_stats: dict, account_info: str, t
         )
     else:
         lines.append("  [dim]Waiting for first tick...[/]")
+
+    # ── HTF Confluence ──
+    htf = status.get("htf", {})
+    if htf:
+        def tf_arrow(t):
+            if t > 0: return "[green]▲[/]"
+            elif t < 0: return "[red]▼[/]"
+            return "[dim]─[/]"
+
+        htf_line = (
+            f"  HTF: 5m{tf_arrow(htf.get('5m', 0))} "
+            f"15m{tf_arrow(htf.get('15m', 0))} "
+            f"1h{tf_arrow(htf.get('1h', 0))}  "
+        )
+        agrees = htf.get("agrees", "neutral")
+        if agrees == "long":
+            htf_line += "[green]BULLISH BIAS[/]"
+        elif agrees == "short":
+            htf_line += "[red]BEARISH BIAS[/]"
+        else:
+            htf_line += "[dim]NEUTRAL[/]"
+        htf_line += f"  str={htf.get('strength', 0):.0%}"
+        lines.append(htf_line)
+
+    # ── Tick Events ──
+    tick_evt = status.get("tick_event")
+    if tick_evt and tick_evt.get("age", 999) < 30:
+        evt_color = "green" if tick_evt["dir"] > 0 else "red"
+        lines.append(
+            f"  [{evt_color}]⚡ {tick_evt['type'].upper()}: {tick_evt['desc']}[/] "
+            f"[dim]({tick_evt['age']:.0f}s ago)[/]"
+        )
 
     lines.append("")
 
@@ -199,10 +234,16 @@ def render_dashboard(agent: TradingAgent, feed_stats: dict, account_info: str, t
     wr = agent.risk_mgr.win_rate
     conf = adaptive.get("confidence_threshold", 0.55)
 
+    balance = risk.get("balance", 0)
+    max_ct = risk.get("max_contracts", 2)
+    intra = status.get("intra_candle_trades", 0)
+
     lines.append(
-        f"  [dim]Candles: {candle_count} | Signals: {signals} | Trades: {trade_count} | "
-        f"Win: {wr:.0%} | Threshold: {conf:.2f} | "
-        f"Feed: {quotes}q/{ftrades}t | Queue: {q_size}[/]"
+        f"  [dim]Bal: ${balance:,.0f} | Max: {max_ct}ct | "
+        f"Candles: {candle_count} | Sig: {signals} | Trades: {trade_count}"
+        f"{'(' + str(intra) + ' intra)' if intra else ''} | "
+        f"Win: {wr:.0%} | Conf: {conf:.2f} | "
+        f"Feed: {quotes}q/{ftrades}t[/]"
     )
 
     # ── Recent Trades ──
