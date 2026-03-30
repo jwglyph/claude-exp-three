@@ -92,16 +92,15 @@ class TradingAgent:
         self._trade_count = 0
         self._start_time = 0.0
 
+    def preload_candles(self, candles: list[Candle]) -> None:
+        """Preload historical candles for instant warmup (no 50-min wait)."""
+        for c in candles:
+            self.aggregator.process_candle(c)
+        self._candle_count = len(candles)
+        logger.info("preloaded_candles", count=len(candles))
+
     async def run(self) -> None:
         """Main run loop - connect to feed and process ticks."""
-        logger.info(
-            "agent_starting",
-            symbol=self.config.symbol,
-            account=self.config.account_size.value,
-            max_contracts=self.config.max_contracts,
-            daily_loss_limit=self.config.daily_loss_limit,
-        )
-
         self._running = True
         self._start_time = time.time()
 
@@ -115,7 +114,7 @@ class TradingAgent:
                 await self._process_tick(tick)
 
         except (asyncio.CancelledError, KeyboardInterrupt):
-            logger.info("agent_cancelled")
+            pass
         except Exception as e:
             logger.error("agent_error", error=str(e))
         finally:

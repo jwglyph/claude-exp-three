@@ -86,37 +86,72 @@ def trade(
             click.echo("  Get API access at https://dashboard.projectx.com (Subscriptions > API Access)")
             sys.exit(1)
 
-        feed, execution = _setup_topstepx(config, username, api_key, paper, environment)
+        feed, execution, client, contract = _setup_topstepx(config, username, api_key, paper, environment)
     elif feed_type == "sim":
         feed = SimulatedFeed(symbol=config.symbol, start_price=20000.0, volatility=0.5, tick_rate=0.01)
         execution = SimulatedExecution(config, slippage_ticks=1)
+        client, contract = None, None
     else:
         feed = WebSocketFeed(
             symbol=config.symbol, url=config.feed_url,
             api_key=api_key, provider=feed_type,
         )
         execution = SimulatedExecution(config, slippage_ticks=1) if paper else LiveExecution(config)
-
-    if paper:
-        click.echo("Mode: PAPER TRADING (simulated execution on real data)")
-    else:
-        click.echo("Mode: LIVE TRADING - REAL MONEY AT RISK!")
+        client, contract = None, None
 
     agent = TradingAgent(config, feed, execution)
 
-    click.echo(f"NQ Adaptive Scalper | {config.symbol} | {config.account_size.value} account")
-    click.echo(f"Max contracts: {config.max_contracts} | Daily loss limit: ${config.daily_loss_limit}")
-    click.echo(f"Feed: {feed_type} | Execution: {'paper' if paper else 'LIVE'}")
-    click.echo("Press Ctrl+C to stop.")
-    click.echo("=" * 60)
+    # Preload historical candles so the agent can trade immediately (no 50-min warmup)
+    if client and contract:
+        click.echo("Loading historical candles for instant warmup...")
+        preload_loop = asyncio.new_event_loop()
+        try:
+            history = preload_loop.run_until_complete(
+                client.get_recent_bars(contract.id, count=config.warmup_candles + 20, unit=2, unit_number=1)
+            )
+            if history:
+                agent.preload_candles(history)
+                click.echo(f"Preloaded {len(history)} candles - agent ready to trade immediately!")
+            else:
+                click.echo("No historical bars available (market may be closed). Will warmup from live data.")
+        except Exception as e:
+            click.echo(f"Could not preload history: {e}. Will warmup from live data.")
+        finally:
+            preload_loop.close()
+
+    # Run with live dashboard
+    from scalper.dashboard import LiveDashboard
+    from rich.live import Live
+    from rich.console import Console
+
+    console = Console()
+    feed_stats_fn = feed.stats if hasattr(feed, 'stats') else lambda: {}
+    if not callable(feed_stats_fn):
+        _stats_prop = feed_stats_fn
+        feed_stats_fn = lambda: getattr(feed, 'stats', {})
+
+    dashboard = LiveDashboard(agent, feed_stats_fn)
+
+    async def run_with_dashboard():
+        """Run agent and dashboard concurrently."""
+        agent_task = asyncio.ensure_future(agent.run())
+
+        with Live(dashboard.render(), refresh_per_second=2, console=console) as live:
+            while agent._running:
+                await asyncio.sleep(0.5)
+                try:
+                    live.update(dashboard.render())
+                except Exception:
+                    pass
+
+        await agent_task
 
     loop = asyncio.new_event_loop()
     try:
-        loop.run_until_complete(agent.run())
+        loop.run_until_complete(run_with_dashboard())
     except KeyboardInterrupt:
-        click.echo("\nCtrl+C received, shutting down...")
+        pass
     finally:
-        # Stop the agent and feed
         agent._running = False
         feed._running = False
         try:
@@ -124,13 +159,11 @@ def trade(
         except Exception:
             pass
         loop.close()
-        # Force kill any remaining SignalR threads
-        click.echo("Stopped.")
         os._exit(0)
 
 
 def _setup_topstepx(config, username, api_key, paper, environment="live"):
-    """Set up TopstepX/ProjectX feed and execution."""
+    """Set up TopstepX/ProjectX feed and execution. Returns (feed, execution, client, contract)."""
     from scalper.feeds.projectx_client import ProjectXClient, ProjectXConfig, get_urls
     from scalper.feeds.projectx_feed import ProjectXFeed
 
@@ -146,7 +179,6 @@ def _setup_topstepx(config, username, api_key, paper, environment="live"):
     )
     client = ProjectXClient(px_config)
 
-    # We need to authenticate and find the NQ contract synchronously for setup
     loop = asyncio.new_event_loop()
     try:
         loop.run_until_complete(client.authenticate())
@@ -154,8 +186,8 @@ def _setup_topstepx(config, username, api_key, paper, environment="live"):
     finally:
         loop.close()
 
-    click.echo(f"Connected to TopstepX | Contract: {contract.id} ({contract.description})")
-    click.echo(f"Tick size: {contract.tick_size} | Tick value: ${contract.tick_value}")
+    click.echo(f"Contract: {contract.id} ({contract.description})")
+    click.echo(f"Tick: {contract.tick_size} / ${contract.tick_value}")
 
     feed = ProjectXFeed(
         client=client,
@@ -169,7 +201,7 @@ def _setup_topstepx(config, username, api_key, paper, environment="live"):
     else:
         execution = LiveExecution(config)
 
-    return feed, execution
+    return feed, execution, client, contract
 
 
 @cli.command()
