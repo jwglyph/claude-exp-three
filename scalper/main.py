@@ -104,20 +104,31 @@ def trade(
     # Preload historical candles so the agent can trade immediately (no 50-min warmup)
     if client and contract:
         click.echo("Loading historical candles for instant warmup...")
-        preload_loop = asyncio.new_event_loop()
         try:
-            history = preload_loop.run_until_complete(
+            # Close stale session from setup loop, create fresh one in new loop
+            import asyncio as _aio
+            _preload_loop = _aio.new_event_loop()
+            _aio.set_event_loop(_preload_loop)
+            # Reset client session so it creates a new one in this loop
+            client._session = None
+            history = _preload_loop.run_until_complete(
                 client.get_recent_bars(contract.id, count=config.warmup_candles + 20, unit=2, unit_number=1)
             )
+            _preload_loop.run_until_complete(client.close())
+            _preload_loop.close()
+            # Reset again for the main loop
+            client._session = None
+
             if history:
                 agent.preload_candles(history)
-                click.echo(f"Preloaded {len(history)} candles - agent ready to trade immediately!")
+                click.echo(f"Preloaded {len(history)} candles - ready to trade!")
             else:
-                click.echo("No historical bars available (market may be closed). Will warmup from live data.")
+                click.echo("No historical bars (market closed?). Warming up from live data.")
         except Exception as e:
-            click.echo(f"Could not preload history: {e}. Will warmup from live data.")
-        finally:
-            preload_loop.close()
+            click.echo(f"Could not preload: {e}. Warming up from live data.")
+
+    # Suppress log output during dashboard mode - dashboard shows everything
+    _configure_logging("WARNING")
 
     # Run with live dashboard
     from scalper.dashboard import LiveDashboard
@@ -125,18 +136,14 @@ def trade(
     from rich.console import Console
 
     console = Console()
-    feed_stats_fn = feed.stats if hasattr(feed, 'stats') else lambda: {}
-    if not callable(feed_stats_fn):
-        _stats_prop = feed_stats_fn
-        feed_stats_fn = lambda: getattr(feed, 'stats', {})
-
+    feed_stats_fn = lambda: getattr(feed, 'stats', {})
     dashboard = LiveDashboard(agent, feed_stats_fn)
 
     async def run_with_dashboard():
         """Run agent and dashboard concurrently."""
         agent_task = asyncio.ensure_future(agent.run())
 
-        with Live(dashboard.render(), refresh_per_second=2, console=console) as live:
+        with Live(dashboard.render(), refresh_per_second=2, console=console, screen=False) as live:
             while agent._running:
                 await asyncio.sleep(0.5)
                 try:
@@ -147,6 +154,7 @@ def trade(
         await agent_task
 
     loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(run_with_dashboard())
     except KeyboardInterrupt:
@@ -183,6 +191,8 @@ def _setup_topstepx(config, username, api_key, paper, environment="live"):
     try:
         loop.run_until_complete(client.authenticate())
         contract = loop.run_until_complete(client.find_active_nq_contract())
+        loop.run_until_complete(client.close())
+        client._session = None  # Will create fresh session in next loop
     finally:
         loop.close()
 
