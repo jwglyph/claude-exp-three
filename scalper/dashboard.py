@@ -18,20 +18,64 @@ from scalper.agent import TradingAgent
 from scalper.models import Side
 
 
-def format_price(p: float) -> str:
+SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+BARS = "▁▂▃▄▅▆▇█"
+
+
+def fp(p: float) -> str:
+    """Format price."""
     return f"{p:,.2f}" if p > 0 else "---"
 
 
-def format_pnl(pnl: float) -> str:
+def fpnl(pnl: float) -> str:
+    """Format P&L with color."""
     if pnl > 0:
         return f"[bold green]+${pnl:,.2f}[/]"
     elif pnl < 0:
         return f"[bold red]-${abs(pnl):,.2f}[/]"
-    return "$0.00"
+    return "[dim]$0.00[/]"
 
 
-def render_dashboard(agent: TradingAgent, feed_stats: dict) -> Table:
-    """Render the full dashboard as a single table layout."""
+def regime_color(regime: str) -> str:
+    colors = {
+        "trending_up": "bold green",
+        "trending_down": "bold red",
+        "ranging": "yellow",
+        "volatile": "bold magenta",
+        "low_volatility": "cyan",
+    }
+    return colors.get(regime, "white")
+
+
+def rsi_color(rsi: float) -> str:
+    if rsi > 70:
+        return "red"
+    elif rsi < 30:
+        return "green"
+    return "white"
+
+
+def make_mini_chart(prices: list[float], width: int = 20) -> str:
+    """Make a tiny sparkline chart from recent prices."""
+    if len(prices) < 2:
+        return "[dim]waiting...[/]"
+    # Take last `width` prices
+    p = prices[-width:]
+    mn, mx = min(p), max(p)
+    rng = mx - mn
+    if rng == 0:
+        return "▅" * len(p)
+    chars = []
+    for v in p:
+        idx = int((v - mn) / rng * (len(BARS) - 1))
+        chars.append(BARS[idx])
+    # Color based on direction
+    color = "green" if p[-1] >= p[0] else "red"
+    return f"[{color}]{''.join(chars)}[/]"
+
+
+def render_dashboard(agent: TradingAgent, feed_stats: dict, account_info: str, tick_counter: int) -> Panel:
+    """Render the full dashboard."""
     status = agent.get_status()
     risk = status["risk"]
     pos = status["position"]
@@ -40,132 +84,180 @@ def render_dashboard(agent: TradingAgent, feed_stats: dict) -> Table:
     regime = status.get("regime", "unknown")
     trades = agent.risk_mgr.trade_history
 
-    # Main grid
-    grid = Table(show_header=False, box=None, padding=(0, 1), expand=True)
-    grid.add_column(ratio=1)
+    # Feed stats
+    quotes = feed_stats.get("quotes", 0)
+    ftrades = feed_stats.get("trades", 0)
+    last_price = feed_stats.get("last_price", 0)
+    q_size = feed_stats.get("queue_size", 0)
+    connected = feed_stats.get("connected", False)
 
-    # ── Header ──
-    now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-    price = feed_stats.get("last_price", 0)
-    header = (
-        f"[bold cyan] NQ ADAPTIVE SCALPER [/] | "
-        f"[white]{format_price(price)}[/] | "
-        f"Regime: [yellow]{regime.upper()}[/] | "
-        f"{now}"
+    # Collect recent close prices for sparkline
+    candles = agent.aggregator.get_candles()
+    recent_closes = [c.close for c in candles[-30:]] if candles else []
+    if last_price > 0:
+        recent_closes.append(last_price)
+
+    # Spinner for liveness
+    spin = SPINNER[tick_counter % len(SPINNER)]
+    now = datetime.now(timezone.utc).strftime("%H:%M:%S")
+
+    # Build output
+    lines = []
+
+    # ── Header with price + sparkline ──
+    conn_icon = "[green]●[/]" if connected else "[red]●[/]"
+    price_str = f"[bold white]{fp(last_price)}[/]" if last_price > 0 else "[dim]waiting...[/]"
+    rc = regime_color(regime)
+    lines.append(
+        f"  {conn_icon} [bold cyan]NQ SCALPER[/]  {price_str}  "
+        f"[{rc}]{regime.upper()}[/]  "
+        f"{make_mini_chart(recent_closes)}  "
+        f"[dim]{now} UTC {spin}[/]"
     )
-    grid.add_row(header)
-    grid.add_row("[dim]─" * 70 + "[/]")
+
+    # ── Account ──
+    if account_info:
+        lines.append(f"  [dim]Account: {account_info}[/]")
+
+    lines.append("")
+
+    # ── Current Candle Building ──
+    current = agent.aggregator.current_candle
+    if current:
+        elapsed = time.time() - current.timestamp
+        bar_pct = min(elapsed / agent.config.candle_interval_sec, 1.0)
+        bar_filled = int(bar_pct * 20)
+        bar = "█" * bar_filled + "░" * (20 - bar_filled)
+        candle_dir = "[green]▲[/]" if current.is_bullish else "[red]▼[/]" if current.is_bearish else "[dim]─[/]"
+        lines.append(
+            f"  Building: [{bar}] {bar_pct:.0%}  "
+            f"{candle_dir} O={current.open:.2f} H={current.high:.2f} L={current.low:.2f} C={current.close:.2f}  "
+            f"V={current.volume} Δ={current.delta:+d}"
+        )
+    else:
+        lines.append("  [dim]Waiting for first tick...[/]")
+
+    lines.append("")
 
     # ── Position ──
     if pos["side"]:
         side_color = "green" if pos["side"] == "long" else "red"
-        pos_line = (
-            f"  Position: [{side_color}]{pos['side'].upper()}[/] @ {format_price(pos['entry'])} | "
-            f"P&L: {format_pnl(pos['pnl'])} | "
-            f"Stop: {format_price(pos['stop'] or 0)} | "
-            f"Target: {format_price(pos['target'] or 0)}"
+        arrow = "▲" if pos["side"] == "long" else "▼"
+        lines.append(
+            f"  [{side_color}]{arrow} {pos['side'].upper()}[/] @ {fp(pos['entry'])}  "
+            f"P&L: {fpnl(pos['pnl'])}  "
+            f"Stop: {fp(pos['stop'] or 0)}  Target: {fp(pos['target'] or 0)}"
         )
         trail = pos.get("trail")
         if trail and trail > 0:
-            pos_line += f" | Trail: {format_price(trail)}"
+            lines[-1] += f"  Trail: {fp(trail)}"
     else:
-        pos_line = "  Position: [dim]FLAT[/]"
-    grid.add_row(pos_line)
+        lines.append("  [dim]● FLAT — scanning for entry...[/]")
 
-    # ── Risk ──
-    pnl_str = format_pnl(risk["daily_pnl"])
-    dd_pct = 100 * (1 - risk["drawdown_remaining"] / agent.config.max_drawdown) if agent.config.max_drawdown > 0 else 0
-    lock_str = " [bold red]LOCKED[/]" if risk["is_locked"] else ""
-    risk_line = (
-        f"  Daily P&L: {pnl_str} | "
-        f"DD Remaining: ${risk['drawdown_remaining']:,.0f} ({100-dd_pct:.0f}%) | "
-        f"Risk x{risk['risk_multiplier']:.1f} | "
+    lines.append("")
+
+    # ── Risk Bar ──
+    daily_pnl = risk["daily_pnl"]
+    dd_rem = risk["drawdown_remaining"]
+    dd_max = agent.config.max_drawdown
+    dd_pct = (dd_max - dd_rem) / dd_max if dd_max > 0 else 0
+    dd_bar_filled = int(dd_pct * 20)
+    dd_color = "green" if dd_pct < 0.3 else "yellow" if dd_pct < 0.6 else "red"
+    dd_bar = f"[{dd_color}]{'█' * dd_bar_filled}[/][dim]{'░' * (20 - dd_bar_filled)}[/]"
+    lock_str = " [bold red]⊘ LOCKED[/]" if risk["is_locked"] else ""
+
+    lines.append(
+        f"  P&L: {fpnl(daily_pnl)}  "
+        f"DD: [{dd_bar}] ${dd_rem:,.0f} left  "
+        f"Risk: x{risk['risk_multiplier']:.1f}  "
         f"Losses: {risk['consecutive_losses']}"
         f"{lock_str}"
     )
-    grid.add_row(risk_line)
+
+    lines.append("")
 
     # ── Indicators ──
-    ind_line = (
-        f"  EMA: {format_price(ind['ema_fast'])}/{format_price(ind['ema_slow'])} | "
-        f"RSI: {ind['rsi']:.0f} | "
-        f"ATR: {ind['atr']:.2f} | "
-        f"VWAP: {format_price(ind['vwap'])}"
+    rsi = ind["rsi"]
+    rsi_c = rsi_color(rsi)
+    # RSI visual bar
+    rsi_pos = int(rsi / 100 * 20)
+    rsi_bar = "░" * rsi_pos + "█" + "░" * (20 - rsi_pos)
+
+    lines.append(
+        f"  EMA: {fp(ind['ema_fast'])}/{fp(ind['ema_slow'])}  "
+        f"RSI: [{rsi_c}]{rsi:.0f}[/] [{rsi_c}][{rsi_bar}][/]  "
+        f"ATR: {ind['atr']:.2f}  "
+        f"VWAP: {fp(ind['vwap'])}"
     )
-    grid.add_row(ind_line)
+
+    lines.append("")
 
     # ── Stats ──
-    quotes = feed_stats.get("quotes", 0)
-    ftrades = feed_stats.get("trades", 0)
-    candles = status["candles"]
+    candle_count = status["candles"]
     signals = status["signals"]
     trade_count = status["trades"]
     wr = agent.risk_mgr.win_rate
     conf = adaptive.get("confidence_threshold", 0.55)
 
-    stats_line = (
-        f"  Candles: {candles} | Signals: {signals} | Trades: {trade_count} | "
-        f"Win: {wr:.0%} | Conf: {conf:.2f} | "
-        f"Feed: {quotes}q/{ftrades}t"
+    lines.append(
+        f"  [dim]Candles: {candle_count} | Signals: {signals} | Trades: {trade_count} | "
+        f"Win: {wr:.0%} | Threshold: {conf:.2f} | "
+        f"Feed: {quotes}q/{ftrades}t | Queue: {q_size}[/]"
     )
-    grid.add_row(stats_line)
 
     # ── Recent Trades ──
     if trades:
-        grid.add_row("[dim]─" * 70 + "[/]")
-        grid.add_row("  [bold]Recent Trades:[/]")
+        lines.append("")
+        lines.append("  [bold]Trade Log:[/]")
 
-        trade_table = Table(box=box.SIMPLE, padding=(0, 1), show_edge=False)
-        trade_table.add_column("#", style="dim", width=3)
-        trade_table.add_column("Side", width=5)
-        trade_table.add_column("Entry", width=10, justify="right")
-        trade_table.add_column("Exit", width=10, justify="right")
-        trade_table.add_column("P&L", width=9, justify="right")
-        trade_table.add_column("Regime", width=14)
-        trade_table.add_column("Reason", width=15)
+        header = f"  [dim]{'#':>3}  {'Side':>5}  {'Entry':>10}  {'Exit':>10}  {'P&L':>8}  {'Regime':<14}  {'Reason':<15}[/]"
+        lines.append(header)
 
-        for i, t in enumerate(trades[-8:], len(trades) - min(8, len(trades)) + 1):
-            side_style = "green" if t.side == Side.LONG else "red"
-            pnl_style = "green" if t.pnl >= 0 else "red"
-            trade_table.add_row(
-                str(i),
-                f"[{side_style}]{t.side.value.upper()}[/]",
-                f"{t.entry_price:,.2f}",
-                f"{t.exit_price:,.2f}",
-                f"[{pnl_style}]${t.pnl:+,.0f}[/]",
-                t.regime.value,
-                t.exit_reason,
+        for i, t in enumerate(trades[-6:], max(1, len(trades) - 5)):
+            side_c = "green" if t.side == Side.LONG else "red"
+            pnl_c = "green" if t.pnl >= 0 else "red"
+            lines.append(
+                f"  {i:3d}  [{side_c}]{t.side.value.upper():>5}[/]  "
+                f"{t.entry_price:10,.2f}  {t.exit_price:10,.2f}  "
+                f"[{pnl_c}]${t.pnl:+7,.0f}[/]  "
+                f"{t.regime.value:<14}  {t.exit_reason:<15}"
             )
-
-        grid.add_row(trade_table)
 
     # ── Regime Stats ──
     regime_stats = adaptive.get("regime_stats", {})
     if regime_stats:
-        grid.add_row("[dim]─" * 70 + "[/]")
+        lines.append("")
         parts = []
         for r, s in regime_stats.items():
             if s["trades"] > 0:
                 wr_c = "green" if s["win_rate"] > 0.5 else "red"
-                parts.append(f"{r}: [{wr_c}]{s['win_rate']:.0%}[/]({s['trades']})")
-        grid.add_row("  Regimes: " + " | ".join(parts))
+                parts.append(f"{r}:[{wr_c}]{s['win_rate']:.0%}[/]({s['trades']})")
+        if parts:
+            lines.append("  [dim]" + " | ".join(parts) + "[/]")
 
-    return grid
+    content = "\n".join(lines)
+
+    border = "green" if connected else "red"
+    return Panel(
+        content,
+        title=f"[bold] NQ Adaptive Scalper [/]",
+        subtitle="[dim]Ctrl+C to stop[/]",
+        border_style=border,
+        padding=(0, 0),
+    )
 
 
 class LiveDashboard:
     """Runs the Rich live display alongside the agent."""
 
-    def __init__(self, agent: TradingAgent, feed_stats_fn):
+    def __init__(self, agent: TradingAgent, feed_stats_fn, account_info: str = ""):
         self.agent = agent
         self.feed_stats_fn = feed_stats_fn
+        self.account_info = account_info
         self.console = Console()
+        self._tick = 0
 
     def render(self):
+        self._tick += 1
         stats = self.feed_stats_fn()
-        return Panel(
-            render_dashboard(self.agent, stats),
-            title="[bold] NQ Scalper [/]",
-            border_style="blue",
-            padding=(0, 1),
-        )
+        return render_dashboard(self.agent, stats, self.account_info, self._tick)

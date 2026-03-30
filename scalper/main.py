@@ -137,25 +137,47 @@ def trade(
         except Exception as e:
             click.echo(f"Could not preload: {e}. Warming up from live data.")
 
-    # Suppress ALL log output during dashboard mode - dashboard shows everything
+    # Fetch account info for display
+    account_info = f"PAPER MODE | {config.account_size.value} | Max {config.max_contracts} contracts"
+    if client:
+        try:
+            _acc_loop = asyncio.new_event_loop()
+            client._session = None
+            session = _acc_loop.run_until_complete(client._ensure_session())
+            url = f"{client.config.api_url}/api/Account/search"
+            import aiohttp
+            async def _fetch_accounts():
+                async with session.post(url, json={"onlyActive": True}, headers=client._auth_headers()) as resp:
+                    return await resp.json()
+            data = _acc_loop.run_until_complete(_fetch_accounts())
+            _acc_loop.run_until_complete(client.close())
+            client._session = None
+            _acc_loop.close()
+
+            if isinstance(data, list) and data:
+                # Show first few account names
+                names = [f"{a.get('name', 'N/A')}" for a in data[:3]]
+                account_info = f"PAPER | Accounts: {', '.join(names)} (+{len(data)-3} more)" if len(data) > 3 else f"PAPER | Accounts: {', '.join(names)}"
+        except Exception:
+            pass
+
+    # Suppress ALL log output during dashboard mode
     _configure_logging("CRITICAL")
 
-    # Run with live dashboard
     from scalper.dashboard import LiveDashboard
     from rich.live import Live
     from rich.console import Console
 
     console = Console()
     feed_stats_fn = lambda: getattr(feed, 'stats', {})
-    dashboard = LiveDashboard(agent, feed_stats_fn)
+    dashboard = LiveDashboard(agent, feed_stats_fn, account_info=account_info)
 
     async def run_with_dashboard():
-        """Run agent and dashboard concurrently."""
         agent_task = asyncio.ensure_future(agent.run())
 
-        with Live(dashboard.render(), refresh_per_second=2, console=console, screen=False) as live:
+        with Live(dashboard.render(), refresh_per_second=4, console=console, screen=False) as live:
             while agent._running:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.25)
                 try:
                     live.update(dashboard.render())
                 except Exception:
