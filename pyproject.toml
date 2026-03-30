@@ -13,6 +13,7 @@ dependencies = [
     "structlog>=23.2",
     "rich>=13.7",
     "click>=8.1",
+    "signalrcore>=1.0",
 ]
 
 [project.optional-dependencies]
