@@ -81,15 +81,8 @@ class TradingAgent:
         # Multi-timeframe engine (5m, 15m, 1h)
         self.mtf = MultiTimeframeEngine()
 
-        # Intra-candle tick analyzer
-        self.tick_analyzer = TickAnalyzer(
-            momentum_threshold_ticks=8,   # 2 points
-            momentum_window_sec=5.0,
-            volume_spike_ratio=3.0,
-            level_proximity_ticks=2,
-            event_cooldown_sec=10.0,
-            max_events_per_candle=3,
-        )
+        # Intra-candle tick analyzer (all thresholds are ATR-adaptive)
+        self.tick_analyzer = TickAnalyzer()
 
         # State
         self._running = False
@@ -321,7 +314,7 @@ class TradingAgent:
         self._current_confluence = self.mtf.get_confluence()
 
         # 4. Update tick analyzer with current levels
-        self.tick_analyzer.update_levels(self._current_indicators)
+        self.tick_analyzer.update_context(self._current_indicators)
 
         if isinstance(self.execution, SimulatedExecution):
             self.execution.set_regime(self._current_regime.regime)

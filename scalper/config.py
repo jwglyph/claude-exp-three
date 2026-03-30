@@ -130,9 +130,8 @@ class ScalperConfig(BaseSettings):
     # Risk per trade (conservative: 5% of drawdown per trade)
     max_risk_per_trade: float = Field(default=100.0, description="Max $ risk per trade (5% of $2K DD)")
     max_risk_high_conf: float = Field(default=150.0, description="Max risk on high-confidence trades")
-    default_stop_ticks: int = Field(default=16, description="Default stop loss in ticks (4 points = $80/contract)")
-    max_stop_ticks: int = Field(default=28, description="Max stop in ticks (7 points = $140/contract)")
     min_rr_ratio: float = Field(default=1.5, description="Minimum reward:risk ratio")
+    # Stops and targets are now fully ATR-relative (no fixed tick values)
 
     # Scaling plan (contracts allowed based on account balance)
     max_contracts: int = Field(default=2, description="Starting max contracts (scaling plan)")
