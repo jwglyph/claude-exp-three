@@ -404,34 +404,49 @@ class TradingAgent:
         regime: RegimeState,
     ) -> None:
         """Evaluate whether to enter on candle close (with HTF confluence)."""
+        # Debug: track why we're not trading (writes to file, bypasses log suppression)
+        debug_info = []
+
         can_trade, reason = self.risk_mgr.can_trade()
         if not can_trade:
+            debug_info.append(f"blocked:can_trade={reason}")
+            self._write_signal_debug(debug_info)
             return
 
         # Generate 1m signal
         signal = self.signal_gen.generate(candles, indicators, regime)
         if signal is None:
+            debug_info.append("no_signal_generated")
+            self._write_signal_debug(debug_info)
             return
+
+        debug_info.append(f"signal:{signal.side.value} conf={signal.confidence:.3f} reasons={signal.reasons[:3]}")
 
         # Apply adaptive confidence threshold
         adaptive_threshold = self.learner.get_confidence_threshold()
         if signal.confidence < adaptive_threshold:
+            debug_info.append(f"below_threshold:{signal.confidence:.3f}<{adaptive_threshold:.3f}")
+            self.journal.log_signal(signal, taken=False, skip_reason=f"conf_{signal.confidence:.2f}<{adaptive_threshold:.2f}")
+            self._write_signal_debug(debug_info)
             return
 
         # Apply adaptive regime weight
         regime_weight = self.learner.get_regime_weight(regime.regime)
         if regime_weight < 0.5:
+            debug_info.append(f"regime_weight_low:{regime_weight:.2f}")
+            self._write_signal_debug(debug_info)
             return
 
         # HTF confluence check
         confluence = self._current_confluence
         if confluence:
             if confluence.agrees_with is not None and confluence.agrees_with != signal.side:
-                # HTF disagrees - need much higher confidence to override
                 if signal.confidence < 0.80:
+                    debug_info.append(f"htf_disagrees:{confluence.agrees_with} vs {signal.side.value}")
+                    self.journal.log_signal(signal, taken=False, skip_reason="htf_disagrees")
+                    self._write_signal_debug(debug_info)
                     return
             elif confluence.agrees_with == signal.side:
-                # HTF agrees - boost confidence
                 signal.confidence = min(1.0, signal.confidence + confluence.strength * 0.1)
                 signal.reasons.append(f"htf:{confluence.description}")
 
@@ -710,6 +725,24 @@ class TradingAgent:
             daily_pnl=round(self.risk_mgr.state.daily_pnl, 2),
             holding_candles=trade.holding_candles,
         )
+
+    def _write_signal_debug(self, info: list[str]) -> None:
+        """Write signal evaluation debug to file (every 10th candle to avoid spam)."""
+        if self._candle_count % 10 != 0:
+            return
+        import pathlib
+        f = pathlib.Path("logs/signal_debug.txt")
+        f.parent.mkdir(exist_ok=True)
+        with open(f, "a") as df:
+            regime = self._current_regime.regime.value if self._current_regime else "?"
+            ind = self._current_indicators
+            atr = round(ind.atr, 1) if ind else 0
+            rsi = round(ind.rsi, 0) if ind else 0
+            price = self.aggregator.last_candle.close if self.aggregator.last_candle else 0
+            df.write(
+                f"candle={self._candle_count} price={price} regime={regime} "
+                f"atr={atr} rsi={rsi} | {' | '.join(info)}\n"
+            )
 
     def _is_tradeable_session(self) -> bool:
         """Determine if the market is tradeable based on ACTUAL conditions, not time of day.

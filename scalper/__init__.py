@@ -1,8 +1,9 @@
 """NQ Adaptive 1-Minute Candle Scalper for TopstepX."""
 
-__version__ = "0.17.0"
+__version__ = "0.17.1"
 
 # Version changelog:
+# 0.17.1 - Debug: log signal evaluation to logs/signal_debug.txt every 10 candles
 # 0.17.0 - 24/7 mode: auto-reconnect, market hours sleep/wake, error resilience
 # 0.16.0 - CRITICAL FIX: type=1 is SELL (bid hit), type=0 is BUY (ask lift). Was inverted!
 # 0.15.1 - Debug: dump raw trade data to logs/trade_debug.txt to diagnose side bias
