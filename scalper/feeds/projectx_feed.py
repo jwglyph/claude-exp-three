@@ -291,9 +291,10 @@ class ProjectXFeed(PriceFeed):
             self._last_price = price
             self._trade_count += 1
 
-            # Log raw data on first few trades so we can see the actual format
-            if self._trade_count <= 3:
+            # Log raw trade data for debugging side inference
+            if self._trade_count <= 5:
                 logger.info("trade_raw_debug", data=str(data)[:500])
+            _raw_type = data.get("type", "?")
 
             # Determine aggressor side
             # Method 1: from trade type field
@@ -320,6 +321,12 @@ class ProjectXFeed(PriceFeed):
                     # Between bid and ask - classify by proximity
                     mid = (self._current_bid + self._current_ask) / 2
                     side = "buy" if price >= mid else "sell"
+
+            # Log side inference for first 20 trades to verify correctness
+            if self._trade_count <= 20:
+                logger.info("trade_side",
+                            price=price, bid=self._current_bid, ask=self._current_ask,
+                            raw_type=_raw_type, side=side)
 
             tick = Tick(
                 timestamp=self._parse_timestamp(data),

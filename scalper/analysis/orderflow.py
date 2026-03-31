@@ -371,44 +371,57 @@ class OrderFlowEngine:
     def _detect_stacked_imbalances(self) -> tuple[int, int]:
         """Count consecutive price levels with buy or sell imbalance.
 
-        3+ stacked buy imbalances = strong institutional buying
-        3+ stacked sell imbalances = strong institutional selling
+        ONLY uses recent data (last 5 min) to avoid stale accumulation.
+        Requires minimum volume per level to filter noise in thin markets.
 
         Returns: (stacked_buy_levels, stacked_sell_levels)
         """
-        if not self._price_levels:
+        now = time.time()
+
+        # Build fresh volume-at-price from RECENT trades only (last 5 min)
+        recent_levels: dict[float, list] = defaultdict(lambda: [0, 0])  # {price: [buy, sell]}
+        for t in reversed(self._tape):
+            if now - t.timestamp > 300:
+                break
+            level_price = round(t.price / self._tick_size) * self._tick_size
+            if t.side == "buy":
+                recent_levels[level_price][0] += t.size
+            elif t.side == "sell":
+                recent_levels[level_price][1] += t.size
+
+        if self._last_price <= 0 or len(recent_levels) < 3:
             return 0, 0
 
-        # Sort price levels
-        sorted_levels = sorted(self._price_levels.values(), key=lambda l: l.price)
+        # Filter: only levels near current price with meaningful volume
+        # Minimum volume = max(5, avg_trade_size * 2) to avoid noise
+        min_vol = max(5, self._avg_trade_size * 2)
 
-        # Only look at levels near current price (within 20 ticks)
-        if self._last_price <= 0:
-            return 0, 0
-
-        nearby = [
-            l for l in sorted_levels
-            if abs(l.price - self._last_price) <= self._tick_size * 20
-            and l.total > 0
-        ]
+        nearby = sorted([
+            (price, buy, sell)
+            for price, (buy, sell) in recent_levels.items()
+            if abs(price - self._last_price) <= self._tick_size * 15
+            and (buy + sell) >= min_vol
+        ])
 
         if len(nearby) < 3:
             return 0, 0
 
-        # Count consecutive levels with >60% buy or sell imbalance
+        # Count consecutive levels with >65% buy or sell imbalance
         imbalance_threshold = 0.65
-
         max_buy_stack = 0
         max_sell_stack = 0
         current_buy = 0
         current_sell = 0
 
-        for level in nearby:
-            if level.imbalance_ratio > imbalance_threshold:
+        for price, buy_v, sell_v in nearby:
+            total = buy_v + sell_v
+            ratio = buy_v / total if total > 0 else 0.5
+
+            if ratio > imbalance_threshold:
                 current_buy += 1
                 current_sell = 0
                 max_buy_stack = max(max_buy_stack, current_buy)
-            elif level.imbalance_ratio < (1 - imbalance_threshold):
+            elif ratio < (1 - imbalance_threshold):
                 current_sell += 1
                 current_buy = 0
                 max_sell_stack = max(max_sell_stack, current_sell)
