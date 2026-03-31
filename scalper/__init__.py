@@ -1,8 +1,9 @@
 """NQ Adaptive 1-Minute Candle Scalper for TopstepX."""
 
-__version__ = "0.16.0"
+__version__ = "0.17.0"
 
 # Version changelog:
+# 0.17.0 - 24/7 mode: auto-reconnect, market hours sleep/wake, error resilience
 # 0.16.0 - CRITICAL FIX: type=1 is SELL (bid hit), type=0 is BUY (ask lift). Was inverted!
 # 0.15.1 - Debug: dump raw trade data to logs/trade_debug.txt to diagnose side bias
 # 0.14.0 - Adaptive trailing: tightens at 3R (0.7x ATR) and 5R+ (0.5x ATR)

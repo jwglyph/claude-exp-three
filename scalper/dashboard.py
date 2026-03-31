@@ -126,9 +126,20 @@ def render_dashboard(agent: TradingAgent, feed_stats: dict, account_info: str, t
         f"[dim]v{__version__} | {pt} / {now} UTC {spin}[/]"
     )
 
-    # ── Account ──
+    # ── Account + Market Status ──
     if account_info:
-        lines.append(f"  [dim]Account: {account_info}[/]")
+        try:
+            from scalper.market_hours import get_session_info
+            mkt = get_session_info()
+            if mkt["open"]:
+                mkt_str = f"[green]OPEN[/] ({mkt['session']})"
+            else:
+                mkt_str = f"[red]CLOSED[/] ({mkt['session']})"
+                if mkt.get("time_to_open"):
+                    mkt_str += f" opens in {mkt['time_to_open']}"
+            lines.append(f"  [dim]{account_info} | Market: {mkt_str}[/]")
+        except Exception:
+            lines.append(f"  [dim]{account_info}[/]")
 
     lines.append("")
 

@@ -196,24 +196,71 @@ def trade(
         # 8. Suppress logs and start dashboard
         _configure_logging("CRITICAL")
 
+        from scalper.market_hours import is_market_open, get_session_info, time_until_open
+        import time as _time
+
         console = Console()
         feed_stats_fn = lambda: getattr(feed, 'stats', {})
         dashboard = LiveDashboard(agent, feed_stats_fn, account_info=account_info)
 
-        # Start agent processing (feed is already connected)
+        # Start agent processing
         agent._running = True
-        agent._start_time = __import__('time').time()
+        agent._start_time = _time.time()
 
         async def agent_loop():
-            try:
-                async for tick in feed.stream():
-                    if not agent._running:
-                        break
-                    await agent._process_tick(tick)
-            except (asyncio.CancelledError, KeyboardInterrupt):
-                pass
-            except Exception:
-                pass
+            """Main agent loop with reconnection and market hours awareness."""
+            while agent._running:
+                try:
+                    # Check market hours
+                    if not is_market_open():
+                        session = get_session_info()
+                        wait = time_until_open()
+                        dashboard.account_info = (
+                            f"MARKET CLOSED ({session['session']}) | "
+                            f"Opens in {session.get('time_to_open', '?')}"
+                        )
+                        # Sleep in 30-second chunks so dashboard still updates
+                        # and we can catch Ctrl+C
+                        sleep_secs = min(wait.total_seconds(), 30)
+                        await asyncio.sleep(max(1, sleep_secs))
+                        continue
+
+                    dashboard.account_info = account_info
+
+                    # Ensure feed is connected
+                    if not feed._connected:
+                        await feed._connect_with_retry()
+
+                    # Process ticks
+                    async for tick in feed.stream():
+                        if not agent._running:
+                            break
+
+                        # Periodic market hours check (every 1000 ticks)
+                        if agent._tick_count % 1000 == 0:
+                            if not is_market_open():
+                                break  # will re-enter the while loop and sleep
+
+                        await agent._process_tick(tick)
+
+                        # Periodic token refresh (every 6 hours)
+                        if agent._tick_count % 500000 == 0 and hasattr(feed, 'update_token'):
+                            try:
+                                await feed.update_token()
+                            except Exception:
+                                pass
+
+                except (asyncio.CancelledError, KeyboardInterrupt):
+                    break
+                except Exception as e:
+                    # Log error to file (dashboard suppresses logs)
+                    import pathlib
+                    err_file = pathlib.Path("logs/errors.txt")
+                    err_file.parent.mkdir(exist_ok=True)
+                    with open(err_file, "a") as ef:
+                        ef.write(f"{_time.time()} agent_loop error: {e}\n")
+                    # Wait and retry
+                    await asyncio.sleep(5)
 
         agent_task = asyncio.ensure_future(agent_loop())
 

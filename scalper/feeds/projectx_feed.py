@@ -65,56 +65,81 @@ class ProjectXFeed(PriceFeed):
         self._trade_count = 0
 
     async def connect(self) -> None:
-        """Authenticate and connect to SignalR Market Hub."""
-        token = await self.client.ensure_authenticated()
+        """Authenticate and connect to SignalR Market Hub with retry."""
+        await self._connect_with_retry()
 
-        market_hub_url = self.client.config.market_hub_url
-        hub_url_with_token = f"{market_hub_url}?access_token={token}"
+    async def _connect_with_retry(self) -> None:
+        """Connect with exponential backoff retry. Never gives up."""
+        attempt = 0
+        while self._running or attempt == 0:
+            attempt += 1
+            try:
+                token = await self.client.ensure_authenticated()
 
-        logger.info(
-            "connecting_market_hub",
-            hub=market_hub_url,
-            contract=self.contract_id,
-        )
+                market_hub_url = self.client.config.market_hub_url
+                hub_url_with_token = f"{market_hub_url}?access_token={token}"
 
-        self._hub = (
-            HubConnectionBuilder()
-            .with_url(hub_url_with_token, options={
-                "skip_negotiation": True,
-                "headers": {"Authorization": f"Bearer {token}"},
-            })
-            .configure_logging(logging_level=30)  # WARNING
-            .with_automatic_reconnect({
-                "type": "interval",
-                "intervals": [1, 2, 5, 10, 30],
-            })
-            .build()
-        )
+                logger.info(
+                    "connecting_market_hub",
+                    hub=market_hub_url,
+                    contract=self.contract_id,
+                    attempt=attempt,
+                )
 
-        # Register event handlers
-        self._hub.on("GatewayQuote", self._on_quote)
-        self._hub.on("GatewayTrade", self._on_trade)
-        if self._subscribe_depth:
-            self._hub.on("GatewayDepth", self._on_depth)
+                # Clean up old hub if reconnecting
+                if self._hub:
+                    try:
+                        self._hub.stop()
+                    except Exception:
+                        pass
+                    self._hub = None
 
-        # Connection lifecycle handlers
-        self._hub.on_open(self._on_connected)
-        self._hub.on_close(self._on_disconnected)
-        self._hub.on_error(self._on_error)
-        self._hub.on_reconnect(self._on_reconnect)
+                self._hub = (
+                    HubConnectionBuilder()
+                    .with_url(hub_url_with_token, options={
+                        "skip_negotiation": True,
+                        "headers": {"Authorization": f"Bearer {token}"},
+                    })
+                    .configure_logging(logging_level=30)
+                    .with_automatic_reconnect({
+                        "type": "interval",
+                        "intervals": [1, 2, 5, 10, 30],
+                    })
+                    .build()
+                )
 
-        # Start connection (signalrcore runs its own thread)
-        self._hub.start()
-        self._running = True
+                self._hub.on("GatewayQuote", self._on_quote)
+                self._hub.on("GatewayTrade", self._on_trade)
+                if self._subscribe_depth:
+                    self._hub.on("GatewayDepth", self._on_depth)
 
-        # Wait for connection
-        for _ in range(50):  # 5 second timeout
-            if self._connected:
-                break
-            await asyncio.sleep(0.1)
+                self._hub.on_open(self._on_connected)
+                self._hub.on_close(self._on_disconnected)
+                self._hub.on_error(self._on_error)
+                self._hub.on_reconnect(self._on_reconnect)
 
-        if not self._connected:
-            logger.warning("hub_connection_timeout", contract=self.contract_id)
+                self._hub.start()
+                self._running = True
+
+                # Wait for connection (10 second timeout)
+                for _ in range(100):
+                    if self._connected:
+                        break
+                    await asyncio.sleep(0.1)
+
+                if self._connected:
+                    logger.info("market_hub_connected", attempt=attempt)
+                    return  # success
+
+                logger.warning("hub_connection_timeout", attempt=attempt)
+
+            except Exception as e:
+                logger.warning("connect_failed", error=str(e), attempt=attempt)
+
+            # Exponential backoff: 2, 4, 8, 16, 30, 30, 30...
+            delay = min(30, 2 ** min(attempt, 4))
+            logger.info("reconnect_waiting", delay=delay, attempt=attempt)
+            await asyncio.sleep(delay)
 
     async def disconnect(self) -> None:
         """Disconnect from SignalR hub."""
@@ -128,21 +153,36 @@ class ProjectXFeed(PriceFeed):
         logger.info("market_hub_disconnected")
 
     async def stream(self) -> AsyncIterator[Tick]:
-        """Stream ticks from the thread-safe queue."""
+        """Stream ticks with automatic reconnection on data loss."""
+        last_tick_time = time.time()
+        no_data_threshold = 60.0  # seconds without data before reconnect
+
         while self._running:
             try:
-                # Poll the thread-safe queue from the async loop
                 tick = self._tick_queue.get_nowait()
                 self._emit(tick)
+                last_tick_time = time.time()
                 yield tick
             except queue.Empty:
-                # No ticks available, yield control briefly
                 await asyncio.sleep(0.01)
+
+                # Check for data timeout (no ticks in 60s = likely disconnected)
+                if time.time() - last_tick_time > no_data_threshold and self._connected:
+                    logger.warning(
+                        "data_timeout",
+                        seconds=no_data_threshold,
+                        last_tick_age=round(time.time() - last_tick_time, 1),
+                    )
+                    # Try to reconnect
+                    self._connected = False
+                    await self._connect_with_retry()
+                    last_tick_time = time.time()
+
             except Exception as e:
                 logger.warning("stream_error", error=str(e))
                 if not self._running:
                     break
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1)
 
     def _subscribe_all(self) -> None:
         """Subscribe to market data for the contract."""
