@@ -160,12 +160,9 @@ class ScalperConfig(BaseSettings):
     min_confidence: float = Field(default=0.60, description="Higher threshold for capital preservation")
     high_confidence: float = Field(default=0.75, description="Allows larger size / risk")
 
-    # --- Session filters (optimized for 50K) ---
-    trade_asian: bool = Field(default=False, description="OFF: thin, not worth the risk")
-    trade_london: bool = Field(default=False, description="OFF for 50K: save bullets for NY")
-    trade_ny_open: bool = Field(default=True, description="ON: best session")
-    trade_ny_afternoon: bool = Field(default=True, description="ON: decent setups")
-    trade_ny_close: bool = Field(default=False, description="OFF: must flatten, thin")
+    # --- Market quality (replaces time-based session filters) ---
+    # The agent trades ANY session if the market shows quality price action.
+    # Only hard rule: must flatten before 3:10 PM CT (TopstepX rule).
 
     # Flatten time: 3:10 PM CT = 4:10 PM ET = 16:10 ET
     flatten_time_et_hour: int = Field(default=16, description="Auto-flatten hour (ET)")

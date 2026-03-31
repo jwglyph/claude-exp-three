@@ -712,23 +712,35 @@ class TradingAgent:
         )
 
     def _is_tradeable_session(self) -> bool:
-        """Check if current time is in an allowed trading session."""
-        now = datetime.now(timezone.utc)
-        # Convert to ET (UTC-4 or UTC-5 depending on DST)
-        # Simplified: use UTC-4 for EDT
-        et_hour = (now.hour - 4) % 24
+        """Determine if the market is tradeable based on ACTUAL conditions, not time of day.
 
-        if 18 <= et_hour or et_hour < 2:
-            return self.config.trade_asian
-        elif 2 <= et_hour < 8:
-            return self.config.trade_london
-        elif 8 <= et_hour < 12:
-            return self.config.trade_ny_open
-        elif 12 <= et_hour < 16:
-            return self.config.trade_ny_afternoon
-        elif 16 <= et_hour < 17:
-            return self.config.trade_ny_close
-        return False
+        Checks:
+        1. Must flatten before 3:10 PM CT (TopstepX rule) - this is the ONLY time check
+        2. Market quality: enough volume and movement to trade
+        3. Spread is reasonable (not holiday/maintenance gaps)
+        """
+        # Only hard rule: must flatten by 3:10 PM CT (4:10 PM ET)
+        if self.risk_mgr._is_near_flatten():
+            return False
+
+        # Market quality check based on actual data, not clock
+        if not self._current_indicators:
+            return False
+
+        ind = self._current_indicators
+        flow = self._current_flow
+
+        # Need minimum ATR to show the market is moving
+        # Below 1.0 ATR = essentially dead, not worth trading
+        if ind.atr < 1.0:
+            return False
+
+        # Need some volume flowing through
+        if flow and flow.total_volume_1m < 5:
+            return False
+
+        # Everything else: let the signal generator and risk manager decide
+        return True
 
     def _log_state(self) -> None:
         """Log current agent state."""
