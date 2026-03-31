@@ -1,8 +1,9 @@
 """NQ Adaptive 1-Minute Candle Scalper for TopstepX."""
 
-__version__ = "0.14.0"
+__version__ = "0.15.0"
 
 # Version changelog:
+# 0.15.0 - Fix buy-biased order flow: tick rule replaces stale bid/ask inference
 # 0.14.0 - Adaptive trailing: tightens at 3R (0.7x ATR) and 5R+ (0.5x ATR)
 # 0.13.0 - Realistic targets: capped at 1.0-1.5x ATR, trailing stop handles runners
 # 0.12.0 - Version tracking: all logs/journal tagged with version

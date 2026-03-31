@@ -60,6 +60,7 @@ class ProjectXFeed(PriceFeed):
         self._last_price = 0.0
         self._current_bid = 0.0
         self._current_ask = 0.0
+        self._last_trade_price = 0.0  # for tick rule
         self._quote_count = 0
         self._trade_count = 0
 
@@ -236,13 +237,9 @@ class ProjectXFeed(PriceFeed):
                 self._current_ask = ask
             self._quote_count += 1
 
-            # Infer side from price vs bid/ask
+            # Quotes are NOT trades - don't infer aggressor side
+            # Side inference happens only on GatewayTrade events
             side = ""
-            if bid > 0 and ask > 0:
-                if price >= ask:
-                    side = "buy"
-                elif price <= bid:
-                    side = "sell"
 
             tick = Tick(
                 timestamp=self._parse_timestamp(data),
@@ -297,12 +294,10 @@ class ProjectXFeed(PriceFeed):
             _raw_type = data.get("type", "?")
 
             # Determine aggressor side
-            # Method 1: from trade type field
+            # Method 1: from trade type field (if the API provides it)
             trade_type = data.get("type", data.get("aggressorSide", data.get("aggressor", "")))
             side = ""
             if isinstance(trade_type, int):
-                # Common conventions: 0=unknown, 1=buy, 2=sell (or vice versa)
-                # Also possible: 1=ask hit (buy), 2=bid hit (sell)
                 side = "buy" if trade_type in (1,) else "sell" if trade_type in (2,) else ""
             elif isinstance(trade_type, str):
                 tl = trade_type.lower()
@@ -311,16 +306,28 @@ class ProjectXFeed(PriceFeed):
                 elif "sell" in tl or "bid" in tl:
                     side = "sell"
 
-            # Method 2: infer from price vs last known bid/ask
+            # Method 2: TICK RULE - compare to previous trade price
+            # This is the industry standard and doesn't suffer from
+            # stale bid/ask timing issues
+            if not side and self._last_trade_price > 0:
+                if price > self._last_trade_price:
+                    side = "buy"   # uptick = buyer aggressive
+                elif price < self._last_trade_price:
+                    side = "sell"  # downtick = seller aggressive
+                else:
+                    # Same price as last trade - use bid/ask as tiebreaker
+                    if self._current_bid > 0 and self._current_ask > 0:
+                        mid = (self._current_bid + self._current_ask) / 2
+                        side = "buy" if price > mid else "sell" if price < mid else ""
+
+            # Method 3: bid/ask only as last resort (first trade of session)
             if not side and self._current_bid > 0 and self._current_ask > 0:
                 if price >= self._current_ask:
-                    side = "buy"  # trade at or above ask = buyer lifted
+                    side = "buy"
                 elif price <= self._current_bid:
-                    side = "sell"  # trade at or below bid = seller hit
-                else:
-                    # Between bid and ask - classify by proximity
-                    mid = (self._current_bid + self._current_ask) / 2
-                    side = "buy" if price >= mid else "sell"
+                    side = "sell"
+
+            self._last_trade_price = price
 
             # Log side inference for first 20 trades to verify correctness
             if self._trade_count <= 20:
