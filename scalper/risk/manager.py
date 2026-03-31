@@ -263,7 +263,18 @@ class RiskManager:
         indicators: IndicatorState,
         regime: RegimeState,
     ) -> float:
-        """Trail stop. Move to breakeven quickly to protect the account."""
+        """Adaptive trailing stop that tightens as profit grows.
+
+        Phases:
+        - < 0.75R: hold at initial stop (let trade develop)
+        - 0.75R: move to breakeven (protect capital)
+        - 1-3R: trail at 1.0x ATR (give room to breathe - current sweet spot)
+        - 3-5R: trail at 0.7x ATR (start protecting the big win)
+        - 5R+: trail at 0.5x ATR (lock it in, this is a gift)
+
+        In trending regimes, also uses fast EMA as floor.
+        Stop only moves in favorable direction, never back.
+        """
         risk = abs(position.entry_price - position.stop_price)
         if risk <= 0:
             return position.stop_price
@@ -275,20 +286,37 @@ class RiskManager:
 
         r_multiple = unrealized / risk if risk > 0 else 0
 
-        # For 50K: move to breakeven faster (at 0.75R instead of 1R)
-        if r_multiple >= 0.75:
-            buffer = self.config.tick_size * 2
-            if position.side == Side.LONG:
-                be_stop = position.entry_price + buffer
-            else:
-                be_stop = position.entry_price - buffer
-        else:
-            be_stop = position.stop_price
+        # Phase 1: below 0.75R - hold original stop
+        if r_multiple < 0.75:
+            return position.stop_price
 
-        # ATR trail
-        atr_trail = indicators.atr * 1.0  # tighter trail for small account
+        # Phase 2: breakeven stop (0.75R+)
+        buffer = self.config.tick_size * 2
+        if position.side == Side.LONG:
+            be_stop = position.entry_price + buffer
+        else:
+            be_stop = position.entry_price - buffer
+
+        # Phase 3+: ATR trail that tightens with profit
+        atr = indicators.atr
+        if atr <= 0:
+            atr = 3.0
+
+        if r_multiple >= 5.0:
+            # Extended runner: tight trail, lock in the gift
+            trail_mult = 0.5
+        elif r_multiple >= 3.0:
+            # Big winner: start tightening
+            trail_mult = 0.7
+        else:
+            # Normal profit: give room to breathe
+            trail_mult = 1.0
+
+        atr_trail = atr * trail_mult
+
         if position.side == Side.LONG:
             atr_stop = current_price - atr_trail
+            # In trend: also use EMA as trailing floor
             if regime.regime == MarketRegime.TRENDING_UP:
                 ema_stop = indicators.ema_fast - self.config.tick_size * 2
                 atr_stop = max(atr_stop, ema_stop)
