@@ -113,6 +113,8 @@ def trade(
         if feed_type == "topstepx":
             # 1. Authenticate
             api_url, market_hub, user_hub = get_urls(environment)
+            from scalper import __version__
+            click.echo(f"NQ Scalper v{__version__}")
             click.echo(f"Connecting to TopstepX ({environment.upper()})...")
             px_config = ProjectXConfig(username=username, api_key=api_key,
                                        api_url=api_url, market_hub_url=market_hub, user_hub_url=user_hub)

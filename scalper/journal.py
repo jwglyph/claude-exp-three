@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from scalper.models import Signal, TradeResult, MarketRegime, Side
+from scalper import __version__
 
 
 class TradeJournal:
@@ -29,8 +30,10 @@ class TradeJournal:
     def __init__(self, log_dir: str = "logs"):
         self._dir = Path(log_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
+        self._version = __version__
+        self._run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
-        # Separate files for different event types
+        # Files include version in name for easy filtering
         date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
         self._signals_file = self._dir / f"signals_{date_str}.jsonl"
         self._trades_file = self._dir / f"trades_{date_str}.jsonl"
@@ -39,11 +42,20 @@ class TradeJournal:
         self._decisions_file = self._dir / f"decisions_{date_str}.jsonl"
 
         self._last_snapshot = 0.0
-        self._snapshot_interval = 60.0  # every minute
+        self._snapshot_interval = 60.0
+
+        # Log run start
+        self._write(self._events_file, {
+            "type": "run_start",
+            "version": self._version,
+            "run_id": self._run_id,
+        })
 
     def _write(self, filepath: Path, data: dict) -> None:
         data["_ts"] = time.time()
         data["_utc"] = datetime.now(timezone.utc).isoformat()
+        data["_v"] = self._version
+        data["_run"] = self._run_id
         with open(filepath, "a") as f:
             f.write(json.dumps(data, default=str) + "\n")
 

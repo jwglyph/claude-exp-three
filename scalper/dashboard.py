@@ -17,6 +17,7 @@ import numpy as np
 
 from scalper.agent import TradingAgent
 from scalper.models import Side
+from scalper import __version__
 
 
 SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
@@ -122,7 +123,7 @@ def render_dashboard(agent: TradingAgent, feed_stats: dict, account_info: str, t
         f"  {conn_icon} [bold cyan]NQ SCALPER[/]  {price_str}  "
         f"[{rc}]{regime.upper()}[/]  "
         f"{make_mini_chart(recent_closes)}  "
-        f"[dim]{pt} / {now} UTC {spin}[/]"
+        f"[dim]v{__version__} | {pt} / {now} UTC {spin}[/]"
     )
 
     # ── Account ──
