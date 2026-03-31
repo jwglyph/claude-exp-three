@@ -300,39 +300,29 @@ class ProjectXFeed(PriceFeed):
                              f"all_keys={list(data.keys())} "
                              f"data={str(data)[:300]}\n")
 
-            # Determine aggressor side
-            # Method 1: from trade type field (if the API provides it)
-            trade_type = data.get("type", data.get("aggressorSide", data.get("aggressor", "")))
-            side = ""
-            if isinstance(trade_type, int):
-                side = "buy" if trade_type in (1,) else "sell" if trade_type in (2,) else ""
-            elif isinstance(trade_type, str):
-                tl = trade_type.lower()
-                if "buy" in tl or "ask" in tl:
-                    side = "buy"
-                elif "sell" in tl or "bid" in tl:
-                    side = "sell"
-
-            # Method 2: TICK RULE - compare to previous trade price
-            # This is the industry standard and doesn't suffer from
-            # stale bid/ask timing issues
-            if not side and self._last_trade_price > 0:
-                if price > self._last_trade_price:
-                    side = "buy"   # uptick = buyer aggressive
-                elif price < self._last_trade_price:
-                    side = "sell"  # downtick = seller aggressive
+            # Determine aggressor side from ProjectX trade type field
+            # CONFIRMED from raw data analysis:
+            #   type=0: trade at/near ASK = BUYER aggressive (lifted the offer)
+            #   type=1: trade at/near BID = SELLER aggressive (hit the bid)
+            #
+            # Evidence: trade#2 price=23334.5 == bid=23334.5, type=1 → seller hit bid
+            #           trade#9 price=23332.75 near ask=23333.0, type=0 → buyer lifted ask
+            trade_type = data.get("type", -1)
+            if trade_type == 0:
+                side = "buy"   # lifted the ask
+            elif trade_type == 1:
+                side = "sell"  # hit the bid
+            else:
+                # Unknown type - fall back to tick rule
+                if self._last_trade_price > 0:
+                    if price > self._last_trade_price:
+                        side = "buy"
+                    elif price < self._last_trade_price:
+                        side = "sell"
+                    else:
+                        side = ""
                 else:
-                    # Same price as last trade - use bid/ask as tiebreaker
-                    if self._current_bid > 0 and self._current_ask > 0:
-                        mid = (self._current_bid + self._current_ask) / 2
-                        side = "buy" if price > mid else "sell" if price < mid else ""
-
-            # Method 3: bid/ask only as last resort (first trade of session)
-            if not side and self._current_bid > 0 and self._current_ask > 0:
-                if price >= self._current_ask:
-                    side = "buy"
-                elif price <= self._current_bid:
-                    side = "sell"
+                    side = ""
 
             self._last_trade_price = price
 
