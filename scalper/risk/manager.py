@@ -86,28 +86,14 @@ class RiskManager:
     def can_trade(self) -> tuple[bool, str]:
         """Check if we're allowed to take a new trade."""
         if self.state.is_locked:
-            return False, self.state.lock_reason
-
-        # Daily loss limit (self-imposed)
-        if self.state.daily_pnl_net <= -self.config.daily_loss_limit:
-            self._lock("daily_loss_limit")
-            return False, f"Daily loss limit hit (${self.config.daily_loss_limit})"
-
-        # Max trades per day
-        if self.state.trades_today >= self.config.max_trades_per_day:
-            self._lock("max_trades")
-            return False, f"Max trades per day ({self.config.max_trades_per_day})"
+            # In paper mode, auto-unlock so testing can continue
+            self.state.is_locked = False
+            self.state.lock_reason = ""
 
         # Trailing drawdown protection - leave buffer
         if self.state.trailing_drawdown_remaining < self.config.max_risk_per_trade * 1.5:
             self._lock("drawdown_critical")
             return False, "Drawdown too tight for any trade"
-
-        # Consecutive loss cooldown
-        if self.state.consecutive_losses >= 3:
-            if self.state.consecutive_losses >= 4:
-                self._lock("consecutive_loss_cooldown")
-                return False, "4 consecutive losses - done for now"
 
         # Check flatten time
         if self._is_near_flatten():

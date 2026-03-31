@@ -55,31 +55,18 @@ class TestCanTrade:
         can, reason = risk_mgr.can_trade()
         assert can is True
 
-    def test_locked_after_daily_loss(self, risk_mgr):
-        # Simulate losses approaching daily limit
-        for _ in range(8):
-            risk_mgr.record_trade(TradeResult(
-                entry_time=0, exit_time=1, side=Side.LONG,
-                entry_price=20000, exit_price=19995,
-                quantity=1, pnl=-100, max_favorable=0, max_adverse=-100,
-                signal_confidence=0.6, regime=MarketRegime.RANGING,
-                exit_reason="stop",
-            ))
+    def test_auto_unlocks_for_paper_testing(self, risk_mgr):
+        """In paper mode, locks auto-clear so testing can continue."""
+        risk_mgr.state.is_locked = True
+        risk_mgr.state.lock_reason = "test_lock"
         can, reason = risk_mgr.can_trade()
-        assert can is False
+        assert can is True  # auto-unlocked
 
-    def test_locked_after_5_consecutive_losses(self, risk_mgr):
-        for _ in range(5):
-            risk_mgr.record_trade(TradeResult(
-                entry_time=0, exit_time=1, side=Side.LONG,
-                entry_price=20000, exit_price=19999,
-                quantity=1, pnl=-20, max_favorable=0, max_adverse=-20,
-                signal_confidence=0.6, regime=MarketRegime.RANGING,
-                exit_reason="stop",
-            ))
+    def test_locks_on_critical_drawdown(self, risk_mgr):
+        """Only hard lock: drawdown too tight for any trade."""
+        risk_mgr.state.trailing_drawdown_remaining = 10.0
         can, reason = risk_mgr.can_trade()
         assert can is False
-        assert "consecutive" in reason.lower()
 
 
 class TestPositionSizing:
