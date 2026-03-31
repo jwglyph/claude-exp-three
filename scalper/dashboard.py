@@ -277,9 +277,9 @@ def render_dashboard(agent: TradingAgent, feed_stats: dict, account_info: str, t
 
         stk_b = of.get("stacked_buy", 0)
         stk_s = of.get("stacked_sell", 0)
-        if stk_b >= 3:
+        if stk_b >= 3 and stk_b <= 12:  # cap display, >12 is likely noise
             flow_parts.append(f"[green]stacked:{stk_b}B[/]")
-        if stk_s >= 3:
+        if stk_s >= 3 and stk_s <= 12:
             flow_parts.append(f"[red]stacked:{stk_s}S[/]")
 
         lines.append("  ".join(flow_parts))

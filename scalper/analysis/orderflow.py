@@ -392,9 +392,12 @@ class OrderFlowEngine:
         if self._last_price <= 0 or len(recent_levels) < 3:
             return 0, 0
 
-        # Filter: only levels near current price with meaningful volume
-        # Minimum volume = max(5, avg_trade_size * 2) to avoid noise
-        min_vol = max(5, self._avg_trade_size * 2)
+        # Filter: only levels with SIGNIFICANT volume
+        # Need at least 5 trades at a level AND volume > 10% of 5-min average per level
+        # This filters noise in thin overnight markets
+        total_recent_vol = sum(b + s for b, s in recent_levels.values())
+        avg_vol_per_level = total_recent_vol / max(len(recent_levels), 1)
+        min_vol = max(10, avg_vol_per_level * 0.5, self._avg_trade_size * 5)
 
         nearby = sorted([
             (price, buy, sell)
