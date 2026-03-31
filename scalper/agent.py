@@ -41,6 +41,8 @@ from scalper.execution.engine import (
 from scalper.adaptive.learner import AdaptiveLearner
 from scalper.analysis.multi_tf import MultiTimeframeEngine, HTFConfluence
 from scalper.analysis.tick_analyzer import TickAnalyzer, TickEvent
+from scalper.journal import TradeJournal
+from scalper.risk.dynamic import DynamicRiskEngine
 
 logger = structlog.get_logger()
 
@@ -83,6 +85,12 @@ class TradingAgent:
 
         # Intra-candle tick analyzer (all thresholds are ATR-adaptive)
         self.tick_analyzer = TickAnalyzer()
+
+        # Dynamic risk engine (Kelly criterion, replaces fixed risk params)
+        self.dynamic_risk = DynamicRiskEngine(max_drawdown=config.max_drawdown)
+
+        # Trade journal (logs everything for iteration)
+        self.journal = TradeJournal()
 
         # State
         self._running = False
@@ -398,12 +406,37 @@ class TradingAgent:
 
         # Check R:R ratio
         if signal.rr_ratio < self.config.min_rr_ratio:
+            self.journal.log_signal(signal, taken=False, skip_reason="rr_too_low")
             return
 
-        # Compute position size
-        size = self.risk_mgr.compute_position_size(signal, indicators, regime)
-        if size <= 0:
+        # Dynamic risk: should we trade at all?
+        should, reason = self.dynamic_risk.should_trade(self.risk_mgr.state.trailing_drawdown_remaining)
+        if not should:
+            self.journal.log_signal(signal, taken=False, skip_reason=f"dynamic:{reason}")
             return
+
+        # Dynamic position sizing (Kelly-based when enough data, conservative otherwise)
+        regime_quality = self.learner.get_regime_weight(regime.regime)
+        optimal_risk = self.dynamic_risk.optimal_risk_dollars(
+            remaining_drawdown=self.risk_mgr.state.trailing_drawdown_remaining,
+            signal_confidence=signal.confidence,
+            regime_quality=regime_quality,
+        )
+
+        # Convert optimal risk $ to contracts
+        stop_distance = abs(signal.entry_price - signal.stop_price)
+        per_contract_risk = stop_distance * self.config.point_value + self.config.commission_rt
+        if per_contract_risk <= 0:
+            return
+
+        size = max(1, int(optimal_risk / per_contract_risk))
+
+        # Cap by scaling plan
+        size = min(size, self.risk_mgr.get_max_contracts())
+
+        # Log signal
+        htf_info = self._current_confluence.__dict__ if self._current_confluence else None
+        self.journal.log_signal(signal, taken=True, size=size, htf_confluence=htf_info)
 
         # Execute entry
         self._signal_count += 1
@@ -591,8 +624,20 @@ class TradingAgent:
         # Record in risk manager
         self.risk_mgr.record_trade(trade)
 
+        # Record in dynamic risk engine
+        risk_amount = abs(trade.entry_price - trade.exit_price) * self.config.point_value * trade.quantity
+        self.dynamic_risk.record_trade(trade.pnl, risk_amount)
+
         # Record in learner
         self.learner.record_trade(trade, self._last_signal_reasons)
+
+        # Journal
+        ind_snapshot = {
+            "atr": round(self._current_indicators.atr, 2) if self._current_indicators else 0,
+            "rsi": round(self._current_indicators.rsi, 1) if self._current_indicators else 0,
+            "regime": self._current_regime.regime.value if self._current_regime else "unknown",
+        }
+        self.journal.log_trade_exit(trade, indicators=ind_snapshot)
 
         self._position = None
         self._candles_since_entry = 0
@@ -744,4 +789,5 @@ class TradingAgent:
             "htf": htf,
             "tick_event": tick_evt,
             "adaptive": self.learner.get_stats_summary(),
+            "dynamic_risk": self.dynamic_risk.get_summary(),
         }

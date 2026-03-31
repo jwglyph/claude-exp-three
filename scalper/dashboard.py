@@ -101,8 +101,14 @@ def render_dashboard(agent: TradingAgent, feed_stats: dict, account_info: str, t
     spin = SPINNER[tick_counter % len(SPINNER)]
     now_utc = datetime.now(timezone.utc)
     now = now_utc.strftime("%H:%M:%S")
-    from datetime import timedelta
-    pst = (now_utc - timedelta(hours=8)).strftime("%H:%M:%S")
+    # Proper Pacific Time with DST handling
+    try:
+        import zoneinfo
+        ptz = zoneinfo.ZoneInfo("America/Los_Angeles")
+        pt = now_utc.astimezone(ptz).strftime("%H:%M:%S %Z")
+    except Exception:
+        from datetime import timedelta
+        pt = (now_utc - timedelta(hours=7)).strftime("%H:%M:%S PDT")
 
     # Build output
     lines = []
@@ -115,7 +121,7 @@ def render_dashboard(agent: TradingAgent, feed_stats: dict, account_info: str, t
         f"  {conn_icon} [bold cyan]NQ SCALPER[/]  {price_str}  "
         f"[{rc}]{regime.upper()}[/]  "
         f"{make_mini_chart(recent_closes)}  "
-        f"[dim]{pst} PST / {now} UTC {spin}[/]"
+        f"[dim]{pt} / {now} UTC {spin}[/]"
     )
 
     # ── Account ──
@@ -224,6 +230,20 @@ def render_dashboard(agent: TradingAgent, feed_stats: dict, account_info: str, t
         f"ATR: {ind['atr']:.2f}  "
         f"VWAP: {fp(ind['vwap'])}"
     )
+
+    # ── Dynamic Risk / Edge ──
+    dr = status.get("dynamic_risk", {})
+    if dr and dr.get("sample_size", 0) > 0:
+        kelly = dr.get("kelly_pct", 0)
+        edge = dr.get("edge_per_dollar", 0)
+        edge_c = "green" if edge > 0 else "red" if edge < 0 else "dim"
+        lines.append(
+            f"  Edge: [{edge_c}]${edge:.2f}/$ risked[/]  "
+            f"Kelly: {kelly:.1f}%  "
+            f"WR: {dr.get('win_rate', 0):.0%}  "
+            f"Payoff: {dr.get('payoff_ratio', 0):.1f}:1  "
+            f"[dim]({dr.get('sample_size', 0)} trades, {dr.get('confidence', 0):.0%} conf)[/]"
+        )
 
     lines.append("")
 
