@@ -859,5 +859,7 @@ class TradingAgent:
                 "large_sell": self._current_flow.large_prints_sell if self._current_flow else 0,
                 "stacked_buy": self._current_flow.stacked_buy_levels if self._current_flow else 0,
                 "stacked_sell": self._current_flow.stacked_sell_levels if self._current_flow else 0,
+                "buy_trades": self._current_flow.buy_trade_count if self._current_flow else 0,
+                "sell_trades": self._current_flow.sell_trade_count if self._current_flow else 0,
             },
         }

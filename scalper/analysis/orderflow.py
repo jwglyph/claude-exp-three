@@ -61,6 +61,11 @@ class OrderFlowState:
     stacked_buy_levels: int = 0   # consecutive price levels with buy imbalance
     stacked_sell_levels: int = 0
 
+    # Diagnostics
+    buy_trade_count: int = 0
+    sell_trade_count: int = 0
+    unknown_trade_count: int = 0
+
     # Overall bias (-1 to +1)
     flow_bias: float = 0.0
 
@@ -208,6 +213,21 @@ class OrderFlowEngine:
         total = buy_1m + sell_1m
         s.imbalance_ratio = buy_1m / total if total > 0 else 0.5
 
+        # --- Diagnostics: count buy vs sell trades to detect bias ---
+        buy_count = sell_count = unk_count = 0
+        for t in reversed(self._tape):
+            if now - t.timestamp > 300:
+                break
+            if t.side == "buy":
+                buy_count += 1
+            elif t.side == "sell":
+                sell_count += 1
+            else:
+                unk_count += 1
+        s.buy_trade_count = buy_count
+        s.sell_trade_count = sell_count
+        s.unknown_trade_count = unk_count
+
         # --- Delta acceleration ---
         # Compare last 30s delta vs prior 30s delta
         buy_30 = sell_30 = buy_60 = sell_60 = 0
@@ -258,30 +278,42 @@ class OrderFlowEngine:
         s.stacked_buy_levels, s.stacked_sell_levels = self._detect_stacked_imbalances()
 
         # --- Overall flow bias ---
-        # Weighted composite of all signals
+        # PRIMARY signal: delta normalized by volume.
+        # Everything else is secondary confirmation.
+        # If delta and price disagree, trust PRICE (delta might be mis-classified).
+
         bias = 0.0
 
-        # Delta direction (normalized)
         if s.total_volume_1m > 0:
-            delta_norm = s.delta_1m / s.total_volume_1m  # -1 to +1
-            bias += delta_norm * 0.25
+            # Delta as fraction of total volume: -1 to +1
+            delta_norm = s.delta_1m / s.total_volume_1m
+            bias = delta_norm  # start with pure delta signal
+        else:
+            s.flow_bias = 0.0
+            return
 
-        # Imbalance
-        bias += (s.imbalance_ratio - 0.5) * 2 * 0.2  # -1 to +1, weight 0.2
+        # Sanity check: compare delta direction with recent price movement
+        # If they disagree persistently, our side inference is probably wrong
+        # In that case, zero out the bias rather than show bad data
+        if len(self._price_at_delta) >= 5:
+            recent_entries = list(self._price_at_delta)[-30:]
+            if len(recent_entries) >= 2:
+                price_change = recent_entries[-1][1] - recent_entries[0][1]
+                delta_change = recent_entries[-1][2] - recent_entries[0][2]
+                # If price dropped but delta is positive (or vice versa) over 30+ ticks,
+                # the side inference is likely wrong - dampen the signal
+                if price_change < -1.0 and delta_change > 0:
+                    bias *= 0.3  # dampen, likely bad side data
+                elif price_change > 1.0 and delta_change < 0:
+                    bias *= 0.3
 
-        # Delta acceleration
-        bias += np.clip(s.delta_acceleration, -1, 1) * 0.15
+        # Secondary: delta acceleration (is pressure increasing?)
+        accel = np.clip(s.delta_acceleration, -1, 1)
+        bias = bias * 0.7 + accel * 0.3
 
-        # Large prints
-        if large_buy + large_sell > 0:
-            large_bias = (large_buy - large_sell) / (large_buy + large_sell)
-            bias += large_bias * 0.15
-
-        # Absorption (inverted: buy absorption = bullish)
-        bias += s.absorption * 0.15
-
-        # Exhaustion (inverted: buy exhaustion = bearish signal)
-        bias -= s.exhaustion * 0.1
+        # Absorption modifies bias
+        if abs(s.absorption) > 0.2:
+            bias += s.absorption * 0.15
 
         s.flow_bias = float(np.clip(bias, -1, 1))
 

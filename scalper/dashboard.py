@@ -259,10 +259,14 @@ def render_dashboard(agent: TradingAgent, feed_stats: dict, account_info: str, t
         delta_bar_pos = int(np.clip((fb + 1) / 2, 0, 1) * 20)
         delta_bar = "░" * delta_bar_pos + "█" + "░" * (20 - delta_bar_pos)
 
+        bt = of.get("buy_trades", 0)
+        st = of.get("sell_trades", 0)
+
         flow_parts = [
             f"  Flow: [{fb_c}][{delta_bar}][/] [{fb_c}]{fb:+.2f}[/]",
             f"Δ1m:[{d1m_c}]{d1m:+d}[/]",
             f"Δ5m:{d5m:+d}",
+            f"[dim]{bt}B/{st}S[/]",
         ]
 
         abs_val = of.get("absorption", 0)
