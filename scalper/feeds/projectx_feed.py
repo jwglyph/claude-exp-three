@@ -58,6 +58,8 @@ class ProjectXFeed(PriceFeed):
         self._connected = False
         self._reconnect_delay = 2.0
         self._last_price = 0.0
+        self._current_bid = 0.0
+        self._current_ask = 0.0
         self._quote_count = 0
         self._trade_count = 0
 
@@ -228,6 +230,10 @@ class ProjectXFeed(PriceFeed):
                 return
 
             self._last_price = price
+            if bid > 0:
+                self._current_bid = bid
+            if ask > 0:
+                self._current_ask = ask
             self._quote_count += 1
 
             # Infer side from price vs bid/ask
@@ -285,12 +291,35 @@ class ProjectXFeed(PriceFeed):
             self._last_price = price
             self._trade_count += 1
 
-            # Determine aggressor side from trade type
-            trade_type = data.get("type", "")
+            # Log raw data on first few trades so we can see the actual format
+            if self._trade_count <= 3:
+                logger.info("trade_raw_debug", data=str(data)[:500])
+
+            # Determine aggressor side
+            # Method 1: from trade type field
+            trade_type = data.get("type", data.get("aggressorSide", data.get("aggressor", "")))
+            side = ""
             if isinstance(trade_type, int):
-                side = "buy" if trade_type == 1 else "sell" if trade_type == 2 else ""
-            else:
-                side = "buy" if "buy" in str(trade_type).lower() else "sell" if "sell" in str(trade_type).lower() else ""
+                # Common conventions: 0=unknown, 1=buy, 2=sell (or vice versa)
+                # Also possible: 1=ask hit (buy), 2=bid hit (sell)
+                side = "buy" if trade_type in (1,) else "sell" if trade_type in (2,) else ""
+            elif isinstance(trade_type, str):
+                tl = trade_type.lower()
+                if "buy" in tl or "ask" in tl:
+                    side = "buy"
+                elif "sell" in tl or "bid" in tl:
+                    side = "sell"
+
+            # Method 2: infer from price vs last known bid/ask
+            if not side and self._current_bid > 0 and self._current_ask > 0:
+                if price >= self._current_ask:
+                    side = "buy"  # trade at or above ask = buyer lifted
+                elif price <= self._current_bid:
+                    side = "sell"  # trade at or below bid = seller hit
+                else:
+                    # Between bid and ask - classify by proximity
+                    mid = (self._current_bid + self._current_ask) / 2
+                    side = "buy" if price >= mid else "sell"
 
             tick = Tick(
                 timestamp=self._parse_timestamp(data),

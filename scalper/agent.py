@@ -185,9 +185,13 @@ class TradingAgent:
         # Feed to multi-timeframe engine
         self.mtf.process_tick(tick.timestamp, tick.price, tick.size, tick.side)
 
-        # Feed to order flow engine
-        if tick.side:  # only trades with aggressor side
+        # Feed to order flow engine - all ticks with a side (buy/sell)
+        if tick.side:
             self.orderflow.process_trade(tick.timestamp, tick.price, tick.size, tick.side)
+
+        # Update flow state periodically (every 50 ticks to avoid overhead)
+        if self._tick_count % 50 == 0:
+            self._current_flow = self.orderflow.get_state()
 
         # Check stops AND pending limit orders on every tick
         if isinstance(self.execution, SimulatedExecution):
