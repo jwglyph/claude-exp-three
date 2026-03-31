@@ -41,6 +41,7 @@ from scalper.execution.engine import (
 from scalper.adaptive.learner import AdaptiveLearner
 from scalper.analysis.multi_tf import MultiTimeframeEngine, HTFConfluence
 from scalper.analysis.tick_analyzer import TickAnalyzer, TickEvent
+from scalper.analysis.orderflow import OrderFlowEngine, OrderFlowState
 from scalper.journal import TradeJournal
 from scalper.risk.dynamic import DynamicRiskEngine
 
@@ -85,6 +86,11 @@ class TradingAgent:
 
         # Intra-candle tick analyzer (all thresholds are ATR-adaptive)
         self.tick_analyzer = TickAnalyzer()
+
+        # Order flow engine (tape reading, delta, absorption, imbalances)
+        self.orderflow = OrderFlowEngine()
+        self.orderflow.set_tick_size(config.tick_size)
+        self._current_flow: Optional[OrderFlowState] = None
 
         # Dynamic risk engine (Kelly criterion, replaces fixed risk params)
         self.dynamic_risk = DynamicRiskEngine(max_drawdown=config.max_drawdown)
@@ -162,9 +168,10 @@ class TradingAgent:
         1. Update execution engine (check fills, stops)
         2. Feed to candle aggregator
         3. Feed to multi-timeframe engine
-        4. Run intra-candle tick analysis
-        5. If tick event detected + HTF confluence → consider immediate entry
-        6. Update position P&L and check risk exits
+        4. Feed to order flow engine
+        5. Run intra-candle tick analysis
+        6. If tick event detected + HTF/orderflow confluence → consider immediate entry
+        7. Update position P&L and check risk exits
         """
         self._tick_count += 1
 
@@ -177,6 +184,10 @@ class TradingAgent:
 
         # Feed to multi-timeframe engine
         self.mtf.process_tick(tick.timestamp, tick.price, tick.size, tick.side)
+
+        # Feed to order flow engine
+        if tick.side:  # only trades with aggressor side
+            self.orderflow.process_trade(tick.timestamp, tick.price, tick.size, tick.side)
 
         # Check stops AND pending limit orders on every tick
         if isinstance(self.execution, SimulatedExecution):
@@ -216,11 +227,12 @@ class TradingAgent:
     def _evaluate_intra_candle_entry(self, event: TickEvent, tick: Tick) -> None:
         """Evaluate an intra-candle tick event for immediate entry.
 
-        Only enters if:
-        1. Tick event has strong direction signal
-        2. HTF confluence agrees
-        3. 1m indicators support (trend, RSI not extreme)
-        4. Risk manager allows
+        Requires confluence across:
+        1. Tick event direction
+        2. HTF agreement
+        3. Order flow agreement (delta, absorption, imbalances)
+        4. 1m indicators support
+        5. Risk manager allows
         """
         if not self._is_tradeable_session():
             return
@@ -229,9 +241,13 @@ class TradingAgent:
         if not can_trade:
             return
 
-        # Need HTF confluence
+        # HTF confluence
         confluence = self.mtf.get_confluence()
         self._current_confluence = confluence
+
+        # Order flow state
+        flow = self.orderflow.get_state()
+        self._current_flow = flow
 
         # Determine side from event
         if event.direction > 0:
@@ -243,21 +259,59 @@ class TradingAgent:
 
         # Check HTF agreement
         if confluence.agrees_with is not None and confluence.agrees_with != side:
-            return  # HTF disagrees, skip
+            self.journal.log_tick_event(event.event_type, event.direction, event.magnitude,
+                                        event.price, event.description, taken=False)
+            return
 
-        # Check 1m indicators support
+        # Check order flow agreement
+        flow_agrees = (
+            (side == Side.LONG and flow.flow_bias > 0.1) or
+            (side == Side.SHORT and flow.flow_bias < -0.1) or
+            flow.flow_bias == 0  # neutral flow = don't block
+        )
+        if not flow_agrees:
+            self.journal.log_tick_event(event.event_type, event.direction, event.magnitude,
+                                        event.price, f"flow_disagrees:{flow.flow_bias:.2f}", taken=False)
+            return
+
+        # Check 1m indicators
         ind = self._current_indicators
         if side == Side.LONG and ind.rsi > 75:
-            return  # too overbought
+            return
         if side == Side.SHORT and ind.rsi < 25:
             return  # too oversold
 
-        # Build confidence from event + confluence + indicators
-        base_conf = 0.45 + event.magnitude * 0.2  # 0.45-0.65 from event
+        # Build confidence from event + confluence + order flow + indicators
+        base_conf = 0.40 + event.magnitude * 0.15  # 0.40-0.55 from event alone
         if confluence.strength > 0.5:
-            base_conf += 0.1  # HTF boost
+            base_conf += 0.08  # HTF boost
         if ind.trend_direction == (1 if side == Side.LONG else -1):
             base_conf += 0.05  # 1m trend aligned
+
+        # Order flow confidence boost (the real edge)
+        flow_strength = abs(flow.flow_bias)
+        base_conf += flow_strength * 0.15  # up to 0.15 from flow
+
+        # Strong order flow signals get extra weight
+        if flow.absorption != 0:
+            # Absorption in our direction = smart money supporting
+            if (side == Side.LONG and flow.absorption > 0.3) or \
+               (side == Side.SHORT and flow.absorption < -0.3):
+                base_conf += 0.08
+        if flow.stacked_buy_levels >= 3 and side == Side.LONG:
+            base_conf += 0.07  # institutional buying stacked
+        if flow.stacked_sell_levels >= 3 and side == Side.SHORT:
+            base_conf += 0.07
+        if flow.large_print_net > 0 and side == Side.LONG:
+            base_conf += 0.05
+        elif flow.large_print_net < 0 and side == Side.SHORT:
+            base_conf += 0.05
+
+        # Delta divergence = warning, reduce confidence
+        price_dir = 1 if side == Side.LONG else -1
+        divergence = self.orderflow.get_delta_divergence(price_dir)
+        if divergence > 0.3:
+            base_conf -= divergence * 0.15
 
         # Must meet minimum threshold
         adaptive_threshold = self.learner.get_confidence_threshold()
@@ -790,4 +844,16 @@ class TradingAgent:
             "tick_event": tick_evt,
             "adaptive": self.learner.get_stats_summary(),
             "dynamic_risk": self.dynamic_risk.get_summary(),
+            "orderflow": {
+                "delta_1m": self._current_flow.delta_1m if self._current_flow else 0,
+                "delta_5m": self._current_flow.delta_5m if self._current_flow else 0,
+                "imbalance": round(self._current_flow.imbalance_ratio, 2) if self._current_flow else 0.5,
+                "flow_bias": round(self._current_flow.flow_bias, 2) if self._current_flow else 0,
+                "absorption": round(self._current_flow.absorption, 2) if self._current_flow else 0,
+                "exhaustion": round(self._current_flow.exhaustion, 2) if self._current_flow else 0,
+                "large_buy": self._current_flow.large_prints_buy if self._current_flow else 0,
+                "large_sell": self._current_flow.large_prints_sell if self._current_flow else 0,
+                "stacked_buy": self._current_flow.stacked_buy_levels if self._current_flow else 0,
+                "stacked_sell": self._current_flow.stacked_sell_levels if self._current_flow else 0,
+            },
         }

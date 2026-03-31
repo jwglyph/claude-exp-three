@@ -13,6 +13,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from rich import box
+import numpy as np
 
 from scalper.agent import TradingAgent
 from scalper.models import Side
@@ -244,6 +245,44 @@ def render_dashboard(agent: TradingAgent, feed_stats: dict, account_info: str, t
             f"Payoff: {dr.get('payoff_ratio', 0):.1f}:1  "
             f"[dim]({dr.get('sample_size', 0)} trades, {dr.get('confidence', 0):.0%} conf)[/]"
         )
+
+    # ── Order Flow ──
+    of = status.get("orderflow", {})
+    if of:
+        d1m = of.get("delta_1m", 0)
+        d5m = of.get("delta_5m", 0)
+        fb = of.get("flow_bias", 0)
+        fb_c = "green" if fb > 0.15 else "red" if fb < -0.15 else "dim"
+        d1m_c = "green" if d1m > 0 else "red" if d1m < 0 else "dim"
+
+        # Delta bar visualization
+        delta_bar_pos = int(np.clip((fb + 1) / 2, 0, 1) * 20)
+        delta_bar = "░" * delta_bar_pos + "█" + "░" * (20 - delta_bar_pos)
+
+        flow_parts = [
+            f"  Flow: [{fb_c}][{delta_bar}][/] [{fb_c}]{fb:+.2f}[/]",
+            f"Δ1m:[{d1m_c}]{d1m:+d}[/]",
+            f"Δ5m:{d5m:+d}",
+        ]
+
+        abs_val = of.get("absorption", 0)
+        if abs(abs_val) > 0.1:
+            abs_c = "green" if abs_val > 0 else "red"
+            flow_parts.append(f"[{abs_c}]absorb:{abs_val:+.1f}[/]")
+
+        lg_b = of.get("large_buy", 0)
+        lg_s = of.get("large_sell", 0)
+        if lg_b + lg_s > 0:
+            flow_parts.append(f"lg:{lg_b}B/{lg_s}S")
+
+        stk_b = of.get("stacked_buy", 0)
+        stk_s = of.get("stacked_sell", 0)
+        if stk_b >= 3:
+            flow_parts.append(f"[green]stacked:{stk_b}B[/]")
+        if stk_s >= 3:
+            flow_parts.append(f"[red]stacked:{stk_s}S[/]")
+
+        lines.append("  ".join(flow_parts))
 
     lines.append("")
 
