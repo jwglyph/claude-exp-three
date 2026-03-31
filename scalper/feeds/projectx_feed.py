@@ -288,10 +288,17 @@ class ProjectXFeed(PriceFeed):
             self._last_price = price
             self._trade_count += 1
 
-            # Log raw trade data for debugging side inference
-            if self._trade_count <= 5:
-                logger.info("trade_raw_debug", data=str(data)[:500])
+            # Log raw trade data to a file (bypasses log level suppression)
             _raw_type = data.get("type", "?")
+            if self._trade_count <= 50:
+                import pathlib
+                debug_file = pathlib.Path("logs/trade_debug.txt")
+                debug_file.parent.mkdir(exist_ok=True)
+                with open(debug_file, "a") as df:
+                    df.write(f"trade#{self._trade_count} price={price} bid={self._current_bid} ask={self._current_ask} "
+                             f"last_trade={self._last_trade_price} raw_type={_raw_type} "
+                             f"all_keys={list(data.keys())} "
+                             f"data={str(data)[:300]}\n")
 
             # Determine aggressor side
             # Method 1: from trade type field (if the API provides it)
@@ -329,11 +336,10 @@ class ProjectXFeed(PriceFeed):
 
             self._last_trade_price = price
 
-            # Log side inference for first 20 trades to verify correctness
-            if self._trade_count <= 20:
-                logger.info("trade_side",
-                            price=price, bid=self._current_bid, ask=self._current_ask,
-                            raw_type=_raw_type, side=side)
+            # Log side inference to debug file
+            if self._trade_count <= 50:
+                with open("logs/trade_debug.txt", "a") as df:
+                    df.write(f"  -> side={side}\n")
 
             tick = Tick(
                 timestamp=self._parse_timestamp(data),
