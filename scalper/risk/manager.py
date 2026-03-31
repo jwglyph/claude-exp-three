@@ -223,16 +223,33 @@ class RiskManager:
         indicators: IndicatorState,
         regime: RegimeState,
     ) -> float:
-        """Compute target. Aim for 1.5-2x RR minimum."""
+        """Compute target. Must be realistic for 1-minute scalping.
+
+        The target is the LESSER of:
+        1. RR-based: stop_distance * rr_ratio (ensures good risk/reward)
+        2. ATR-based: 1.0-1.5x ATR (what price can realistically reach)
+
+        We don't set targets 100+ points away on a scalper. The trailing
+        stop handles letting winners run beyond the initial target.
+        """
         risk = abs(entry_price - stop_price)
+        atr = max(indicators.atr, 1.0)
 
-        rr = self.config.min_rr_ratio
+        # RR-based target
+        rr = self.config.min_rr_ratio  # 1.5
+        rr_target = risk * rr
+
+        # ATR-based cap: max target = 1.5x ATR in trends, 1.0x in ranges
         if regime.regime in (MarketRegime.TRENDING_UP, MarketRegime.TRENDING_DOWN):
-            rr = max(rr, 2.0)
-        elif regime.regime == MarketRegime.RANGING:
-            rr = max(rr, 1.5)
+            atr_cap = atr * 1.5
+        else:
+            atr_cap = atr * 1.0
 
-        target_distance = risk * rr
+        # Use the smaller of the two (realistic + good RR)
+        target_distance = min(rr_target, atr_cap)
+
+        # Floor: at least 0.5x ATR (otherwise not worth the trade)
+        target_distance = max(target_distance, atr * 0.5)
 
         if side == Side.LONG:
             return entry_price + target_distance
