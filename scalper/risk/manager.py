@@ -182,18 +182,18 @@ class RiskManager:
         indicators: IndicatorState,
         regime: RegimeState,
     ) -> float:
-        """Compute stop loss. Fully ATR-relative, no fixed point values.
+        """Compute stop loss. ATR-driven, then SIZE is adjusted to fit risk.
 
-        Stop = ATR * regime_multiplier, capped by:
-        1. Max risk per trade / point_value (dollar risk cap)
-        2. % of remaining drawdown (account preservation)
-        3. Minimum of 0.4x ATR (avoid getting stopped by noise)
+        The stop should be where the trade thesis is WRONG, not where
+        our dollar risk limit says. If we can't afford the proper stop
+        distance, we trade smaller or skip - we DON'T tighten the stop
+        into noise.
         """
         atr = indicators.atr
         if atr <= 0:
             atr = 3.0
 
-        # Regime-adaptive multiplier (all relative to ATR)
+        # Regime-adaptive multiplier
         multiplier = {
             MarketRegime.VOLATILE: 1.5,
             MarketRegime.LOW_VOLATILITY: 0.8,
@@ -204,16 +204,8 @@ class RiskManager:
 
         stop_distance = atr * multiplier
 
-        # Cap 1: max dollar risk → max stop distance
-        max_stop_from_risk = self.config.max_risk_per_trade / self.config.point_value
-        stop_distance = min(stop_distance, max_stop_from_risk)
-
-        # Cap 2: don't risk more than 15% of remaining drawdown on one trade
-        max_stop_from_dd = (self.state.trailing_drawdown_remaining * 0.15) / self.config.point_value
-        stop_distance = min(stop_distance, max_stop_from_dd)
-
-        # Floor: at least 0.4x ATR to avoid noise stops
-        stop_distance = max(stop_distance, atr * 0.4)
+        # Floor: at least 0.5x ATR to avoid noise stops
+        stop_distance = max(stop_distance, atr * 0.5)
 
         # Quantize to tick size
         stop_distance = round(stop_distance / self.config.tick_size) * self.config.tick_size

@@ -124,8 +124,9 @@ class DynamicRiskEngine:
         falls back to conservative fixed fraction.
         """
         if self._edge.sample_size < self.min_sample_size:
-            # Not enough data - use conservative 3% of remaining drawdown
-            base = remaining_drawdown * 0.03
+            # Learning phase: 5% of remaining drawdown
+            # Must be enough to cover at least 1 contract at current ATR
+            base = remaining_drawdown * 0.05
         elif self._edge.kelly_fraction <= 0:
             # No edge detected - minimum size
             base = remaining_drawdown * 0.02
@@ -160,12 +161,12 @@ class DynamicRiskEngine:
         base *= dd_scale
 
         # Hard caps
-        # Never risk more than 10% of remaining drawdown
-        cap = remaining_drawdown * 0.10
-        # Never risk more than $250 (even with full Kelly + high confidence)
-        cap = min(cap, 250.0)
-        # Floor: at least $20 (otherwise not worth the trade)
-        floor = 20.0
+        # Never risk more than 15% of remaining drawdown
+        cap = remaining_drawdown * 0.15
+        # Never risk more than $400
+        cap = min(cap, 400.0)
+        # Floor: at least $30 (otherwise not worth the trade)
+        floor = 30.0
 
         return max(floor, min(base, cap))
 
