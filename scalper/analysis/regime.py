@@ -214,19 +214,30 @@ class RegimeDetector:
         return float(np.clip(hurst, 0, 1))
 
     def _compute_direction(self, highs: np.ndarray, lows: np.ndarray, closes: np.ndarray) -> float:
-        """Directional movement score: -1 (strong down) to +1 (strong up)."""
+        """Directional movement score: -1 (strong down) to +1 (strong up).
+
+        Weights recent candles MORE heavily so the regime flips faster
+        when price reverses.
+        """
         if len(closes) < 3:
             return 0.0
 
-        # Net price change over lookback, normalized by range
+        # Short-term direction (last 5 candles) - most important
+        if len(closes) >= 5:
+            short_change = closes[-1] - closes[-5]
+            short_range = np.sum(highs[-5:] - lows[-5:])
+            short_eff = short_change / short_range if short_range > 0 else 0
+        else:
+            short_eff = 0
+
+        # Medium-term direction (full lookback)
         net_change = closes[-1] - closes[0]
         total_range = np.sum(highs - lows)
+        med_eff = net_change / total_range if total_range > 0 else 0
 
-        if total_range == 0:
-            return 0.0
-
-        efficiency = net_change / total_range  # Price efficiency ratio
-        return float(np.clip(efficiency * 3, -1, 1))  # Scale up for sensitivity
+        # Weight: 70% short-term, 30% medium-term
+        combined = 0.7 * short_eff + 0.3 * med_eff
+        return float(np.clip(combined * 3, -1, 1))
 
     def _classify(
         self,
@@ -242,17 +253,17 @@ class RegimeDetector:
         # Score each regime
         scores = {}
 
-        # TRENDING_UP: strong upward direction + high trend strength
+        # TRENDING_UP: strong upward direction + trend strength
         scores[MarketRegime.TRENDING_UP] = (
-            max(0, direction) * 0.5 +
-            trend_strength * 0.3 +
+            max(0, direction) * 0.6 +
+            trend_strength * 0.2 +
             (1 if indicators.trend_direction == 1 else 0) * 0.2
         )
 
-        # TRENDING_DOWN: strong downward direction + high trend strength
+        # TRENDING_DOWN: strong downward direction + trend strength
         scores[MarketRegime.TRENDING_DOWN] = (
-            max(0, -direction) * 0.5 +
-            trend_strength * 0.3 +
+            max(0, -direction) * 0.6 +
+            trend_strength * 0.2 +
             (1 if indicators.trend_direction == -1 else 0) * 0.2
         )
 
@@ -283,8 +294,9 @@ class RegimeDetector:
         total = sum(scores.values())
         confidence = best_score / total if total > 0 else 0.3
 
-        # Apply hysteresis: require higher confidence to switch regime
-        if best_regime != self._current_regime and confidence < 0.35:
+        # Reduced hysteresis: allow faster regime switches
+        # Only hold current regime if the new one is very weakly indicated
+        if best_regime != self._current_regime and confidence < 0.25:
             return self._current_regime, confidence
 
         return best_regime, float(np.clip(confidence, 0, 1))

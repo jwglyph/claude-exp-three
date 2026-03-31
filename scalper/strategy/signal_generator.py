@@ -353,37 +353,58 @@ class SignalGenerator:
         bull: list[tuple[str, float]],
         bear: list[tuple[str, float]],
     ) -> None:
-        """Generate regime-specific signals."""
-        if regime.regime == MarketRegime.TRENDING_UP:
-            # Pullback to EMA in uptrend
-            if price <= ind.ema_fast * 1.001 and price >= ind.ema_slow * 0.999:
-                if candles[-1].is_bullish:
-                    bull.append(("trend_pullback_buy", 0.25))
+        """Generate signals based on what price is ACTUALLY doing.
 
-        elif regime.regime == MarketRegime.TRENDING_DOWN:
-            # Rally to EMA in downtrend
-            if price >= ind.ema_fast * 0.999 and price <= ind.ema_slow * 1.001:
-                if candles[-1].is_bearish:
-                    bear.append(("trend_pullback_sell", 0.25))
+        NOT biased by regime label. Both long and short signals are
+        always considered. The regime just adjusts weights slightly.
+        """
+        last = candles[-1]
 
-        elif regime.regime == MarketRegime.RANGING:
-            # Mean reversion: buy low, sell high within range
-            recent_high = max(c.high for c in candles[-20:])
-            recent_low = min(c.low for c in candles[-20:])
-            range_size = recent_high - recent_low
-            if range_size > 0:
-                pos_in_range = (price - recent_low) / range_size
-                if pos_in_range < 0.2:
-                    bull.append(("range_bottom", 0.2))
-                elif pos_in_range > 0.8:
-                    bear.append(("range_top", 0.2))
+        # --- Pullback to EMA (works in any regime) ---
+        # Price pulling back to fast EMA from above = potential long
+        if price <= ind.ema_fast * 1.001 and price >= ind.ema_slow * 0.999:
+            if last.is_bullish:
+                weight = 0.2 if regime.regime == MarketRegime.TRENDING_UP else 0.12
+                bull.append(("pullback_to_ema_buy", weight))
 
-        elif regime.regime == MarketRegime.LOW_VOLATILITY:
-            # Breakout from compression
-            if ind.bb_width < 0.003:
-                if candles[-1].is_bullish and candles[-1].close > ind.bb_upper:
-                    bull.append(("compression_breakout_up", 0.25))
-                elif candles[-1].is_bearish and candles[-1].close < ind.bb_lower:
+        # Price rallying to fast EMA from below = potential short
+        if price >= ind.ema_fast * 0.999 and price <= ind.ema_slow * 1.001:
+            if last.is_bearish:
+                weight = 0.2 if regime.regime == MarketRegime.TRENDING_DOWN else 0.12
+                bear.append(("pullback_to_ema_sell", weight))
+
+        # --- Range extremes (works in any regime) ---
+        recent_high = max(c.high for c in candles[-20:])
+        recent_low = min(c.low for c in candles[-20:])
+        range_size = recent_high - recent_low
+        if range_size > 0:
+            pos_in_range = (price - recent_low) / range_size
+            if pos_in_range < 0.15:
+                bull.append(("near_range_low", 0.15))
+            elif pos_in_range > 0.85:
+                bear.append(("near_range_high", 0.15))
+
+        # --- Price below BOTH EMAs = bearish structure ---
+        if price < ind.ema_fast and price < ind.ema_slow:
+            bear.append(("below_both_emas", 0.12))
+        elif price > ind.ema_fast and price > ind.ema_slow:
+            bull.append(("above_both_emas", 0.12))
+
+        # --- Recent candle direction (last 3 candles) ---
+        if len(candles) >= 3:
+            recent_3 = candles[-3:]
+            bearish_count = sum(1 for c in recent_3 if c.is_bearish)
+            bullish_count = sum(1 for c in recent_3 if c.is_bullish)
+            if bearish_count >= 3:
+                bear.append(("three_bearish", 0.1))
+            elif bullish_count >= 3:
+                bull.append(("three_bullish", 0.1))
+
+        # --- Compression breakout ---
+        if ind.bb_width < 0.003:
+            if last.is_bullish and last.close > ind.bb_upper:
+                bull.append(("compression_breakout_up", 0.2))
+            elif last.is_bearish and last.close < ind.bb_lower:
                     bear.append(("compression_breakout_down", 0.25))
 
     def _adjust_confidence(
@@ -392,17 +413,17 @@ class SignalGenerator:
         regime: RegimeState,
         indicators: IndicatorState,
     ) -> float:
-        """Adjust confidence based on context."""
+        """Adjust confidence. Minimal adjustment - let the factors speak."""
         conf = raw_confidence
 
-        # Boost confidence in high-regime-confidence environments
-        conf *= (0.8 + 0.4 * regime.confidence)
+        # Slight boost when regime confidence is high (market is clear)
+        conf *= (0.9 + 0.2 * regime.confidence)
 
-        # Reduce confidence in volatile regimes
+        # Slight reduction in volatile regime (higher noise)
         if regime.regime == MarketRegime.VOLATILE:
-            conf *= 0.8
+            conf *= 0.9
 
-        # Reduce confidence if price is right at a key level (uncertain)
+        # Reduce confidence if price is right at BB middle (no man's land)
         if abs(indicators.bb_percent_b - 0.5) < 0.1:
             conf *= 0.9
 

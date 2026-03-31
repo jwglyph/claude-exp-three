@@ -496,15 +496,16 @@ class RiskManager:
         self.state.risk_multiplier = float(np.clip(base, 0.1, 1.2))
 
     def _regime_risk_scale(self, regime: MarketRegime, side: Optional[Side]) -> float:
-        """Scale risk by regime. Conservative for 50K."""
+        """Scale risk by regime. No directional bias - if the signal says short,
+        the risk manager should respect it regardless of regime label."""
         scales = {
-            MarketRegime.TRENDING_UP: 1.0 if side == Side.LONG else 0.4,
-            MarketRegime.TRENDING_DOWN: 1.0 if side == Side.SHORT else 0.4,
-            MarketRegime.RANGING: 0.7,
-            MarketRegime.VOLATILE: 0.3,  # very cautious
-            MarketRegime.LOW_VOLATILITY: 0.5,
+            MarketRegime.TRENDING_UP: 0.9,
+            MarketRegime.TRENDING_DOWN: 0.9,
+            MarketRegime.RANGING: 0.8,
+            MarketRegime.VOLATILE: 0.4,  # cautious in chaos
+            MarketRegime.LOW_VOLATILITY: 0.6,
         }
-        return scales.get(regime, 0.5)
+        return scales.get(regime, 0.7)
 
     def _is_near_flatten(self) -> bool:
         """Check if we're within 5 minutes of flatten time."""
