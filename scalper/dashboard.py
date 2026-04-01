@@ -192,6 +192,7 @@ def render_dashboard(agent: TradingAgent, feed_stats: dict, account_info: str, t
         )
 
     # ── Signal Scan (what the agent is seeing) ──
+    # ── Signal Scan (1m candle close analysis) ──
     scan = status.get("scan")
     if scan:
         bs = scan.get("bull_score", 0)
@@ -199,16 +200,13 @@ def render_dashboard(agent: TradingAgent, feed_stats: dict, account_info: str, t
         bull_factors = scan.get("bull", [])
         bear_factors = scan.get("bear", [])
 
-        # Bull factors
         if bull_factors:
-            bull_parts = [f"[green]{name}[/][dim]({w:.2f})[/]" for name, w in bull_factors[:5]]
+            bull_parts = [f"[green]{name}[/][dim]({w:.2f})[/]" for name, w in bull_factors[:6]]
             lines.append(f"  [green]▲ BULL {bs:.2f}[/]: {' '.join(bull_parts)}")
-        # Bear factors
         if bear_factors:
-            bear_parts = [f"[red]{name}[/][dim]({w:.2f})[/]" for name, w in bear_factors[:5]]
+            bear_parts = [f"[red]{name}[/][dim]({w:.2f})[/]" for name, w in bear_factors[:6]]
             lines.append(f"  [red]▼ BEAR {ss:.2f}[/]: {' '.join(bear_parts)}")
 
-        # Net verdict
         if bs + ss > 0:
             net = bs - ss
             total = bs + ss
@@ -217,7 +215,37 @@ def render_dashboard(agent: TradingAgent, feed_stats: dict, account_info: str, t
             conf = sep * 0.5 + dominant * 0.5
             verdict_side = "[green]LONG[/]" if net > 0 else "[red]SHORT[/]"
             conf_color = "green" if conf >= 0.50 else "yellow" if conf >= 0.35 else "dim"
-            lines.append(f"  Net: {verdict_side} [{conf_color}]conf={conf:.2f}[/] (need 0.50)")
+            lines.append(f"  Net: {verdict_side} [{conf_color}]conf={conf:.2f}[/] (need 0.50) [dim](updates on 1m close)[/]")
+
+    # ── Intra-candle monitoring ──
+    intra_parts = []
+
+    # Show tick analyzer status
+    tick_evt = status.get("tick_event")
+    if tick_evt and tick_evt.get("age", 999) < 30:
+        evt_color = "green" if tick_evt["dir"] > 0 else "red"
+        intra_parts.append(f"[{evt_color}]⚡{tick_evt['type']}:{tick_evt['desc']}[/] ({tick_evt['age']:.0f}s)")
+
+    # Current candle direction + delta as real-time signal
+    if current:
+        candle_move = current.close - current.open
+        if abs(candle_move) > 0:
+            c_dir = "[green]▲[/]" if candle_move > 0 else "[red]▼[/]"
+            intra_parts.append(f"candle:{c_dir}{abs(candle_move):.1f}pts")
+        if current.delta != 0:
+            d_color = "green" if current.delta > 0 else "red"
+            intra_parts.append(f"Δ:[{d_color}]{current.delta:+d}[/]")
+
+    # Flow direction as real-time signal
+    of = status.get("orderflow", {})
+    fb = of.get("flow_bias", 0)
+    if abs(fb) > 0.1:
+        f_color = "green" if fb > 0 else "red"
+        f_dir = "buying" if fb > 0 else "selling"
+        intra_parts.append(f"flow:[{f_color}]{f_dir}[/]")
+
+    if intra_parts:
+        lines.append(f"  [dim]Live:[/] {' | '.join(intra_parts)}")
 
     lines.append("")
 
