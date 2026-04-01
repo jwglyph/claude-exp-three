@@ -30,6 +30,10 @@ backtest = [
 [project.scripts]
 nq-scalper = "scalper.main:cli"
 
+[tool.setuptools.packages.find]
+include = ["scalper*"]
+exclude = ["tests*", "scripts*", "logs*"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
