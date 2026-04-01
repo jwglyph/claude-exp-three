@@ -107,6 +107,7 @@ class TradingAgent:
         self._position: Optional[Position] = None
         self._last_signal_reasons: list[str] = []
         self._last_tick_event: Optional[TickEvent] = None
+        self._last_scan: Optional[dict] = None  # last signal evaluation for dashboard
         self._candles_since_entry: int = 0
         self._pending_signal: Optional[Signal] = None
         self._pending_size: int = 0
@@ -877,6 +878,7 @@ class TradingAgent:
             "htf": htf,
             "tick_event": tick_evt,
             "adaptive": self.learner.get_stats_summary(),
+            "scan": self.signal_gen.last_scan,
             "dynamic_risk": self.dynamic_risk.get_summary(),
             "orderflow": {
                 "delta_1m": self._current_flow.delta_1m if self._current_flow else 0,

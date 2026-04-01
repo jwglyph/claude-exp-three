@@ -191,6 +191,34 @@ def render_dashboard(agent: TradingAgent, feed_stats: dict, account_info: str, t
             f"[dim]({tick_evt['age']:.0f}s ago)[/]"
         )
 
+    # ── Signal Scan (what the agent is seeing) ──
+    scan = status.get("scan")
+    if scan:
+        bs = scan.get("bull_score", 0)
+        ss = scan.get("bear_score", 0)
+        bull_factors = scan.get("bull", [])
+        bear_factors = scan.get("bear", [])
+
+        # Bull factors
+        if bull_factors:
+            bull_parts = [f"[green]{name}[/][dim]({w:.2f})[/]" for name, w in bull_factors[:5]]
+            lines.append(f"  [green]▲ BULL {bs:.2f}[/]: {' '.join(bull_parts)}")
+        # Bear factors
+        if bear_factors:
+            bear_parts = [f"[red]{name}[/][dim]({w:.2f})[/]" for name, w in bear_factors[:5]]
+            lines.append(f"  [red]▼ BEAR {ss:.2f}[/]: {' '.join(bear_parts)}")
+
+        # Net verdict
+        if bs + ss > 0:
+            net = bs - ss
+            total = bs + ss
+            dominant = max(bs, ss)
+            sep = abs(net) / total
+            conf = sep * 0.5 + dominant * 0.5
+            verdict_side = "[green]LONG[/]" if net > 0 else "[red]SHORT[/]"
+            conf_color = "green" if conf >= 0.50 else "yellow" if conf >= 0.35 else "dim"
+            lines.append(f"  Net: {verdict_side} [{conf_color}]conf={conf:.2f}[/] (need 0.50)")
+
     lines.append("")
 
     # ── Position ──

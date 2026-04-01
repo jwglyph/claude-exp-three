@@ -1,8 +1,9 @@
 """NQ Adaptive 1-Minute Candle Scalper for TopstepX."""
 
-__version__ = "0.19.0"
+__version__ = "0.20.0"
 
 # Version changelog:
+# 0.20.0 - Live signal scan: shows bull/bear factors + weights + confidence in dashboard
 # 0.19.0 - Lower confidence threshold 0.60→0.50. Scoring data showed max 0.547, need 0.50 to trade
 # 0.18.1 - Signal gen always returns signal with confidence, agent filters. Shows raw scores in debug
 # 0.18.0 - Fix: confidence formula was broken (0.14 max), removed volume gate from session check

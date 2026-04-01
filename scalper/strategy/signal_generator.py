@@ -30,6 +30,7 @@ class SignalGenerator:
     def __init__(self, config: ScalperConfig):
         self.config = config
         self._signal_count = 0
+        self.last_scan: Optional[dict] = None  # stores last evaluation for dashboard
 
     def generate(
         self,
@@ -80,9 +81,18 @@ class SignalGenerator:
         bull_reasons = [r for r, _ in bull_factors]
         bear_reasons = [r for r, _ in bear_factors]
 
+        # Save scan data for dashboard display
+        self.last_scan = {
+            "bull": bull_factors,
+            "bear": bear_factors,
+            "bull_score": round(bull_score, 3),
+            "bear_score": round(bear_score, 3),
+        }
+
         # Need some factors on at least one side
         total = bull_score + bear_score
         if total == 0:
+            self.last_scan["result"] = "no_factors"
             return None
 
         # Confidence: how dominant is the winning side?
