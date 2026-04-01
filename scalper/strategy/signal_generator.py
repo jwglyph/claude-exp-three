@@ -80,13 +80,22 @@ class SignalGenerator:
         bull_reasons = [r for r, _ in bull_factors]
         bear_reasons = [r for r, _ in bear_factors]
 
-        # Need meaningful separation between bull and bear
-        net = bull_score - bear_score
+        # Need some factors on at least one side
         total = bull_score + bear_score
         if total == 0:
             return None
 
-        confidence = abs(net) / total
+        # Confidence: how dominant is the winning side?
+        # Use the winning side's score directly, scaled by separation
+        # This allows high confidence when one side has multiple confirming factors
+        net = bull_score - bear_score
+        dominant = max(bull_score, bear_score)
+        separation = abs(net) / total  # 0=tied, 1=one-sided
+
+        # Confidence = dominant score * separation boost
+        # If bull=0.5, bear=0.1: dominant=0.5, separation=0.67 → conf=0.5*0.67+0.5*0.5=0.58
+        # If bull=0.7, bear=0.1: dominant=0.7, separation=0.75 → conf=0.7*0.75+0.5*0.7=0.88 (capped)
+        confidence = separation * 0.5 + dominant * 0.5
         confidence = self._adjust_confidence(confidence, regime, indicators)
 
         # Determine signal type and side

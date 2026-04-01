@@ -418,11 +418,12 @@ class TradingAgent:
         # Generate 1m signal
         signal = self.signal_gen.generate(candles, indicators, regime)
         if signal is None:
-            debug_info.append("no_signal_generated")
+            # Log what the signal gen actually computed
+            debug_info.append(f"no_signal(min_conf={self.config.min_confidence})")
             self._write_signal_debug(debug_info)
             return
 
-        debug_info.append(f"signal:{signal.side.value} conf={signal.confidence:.3f} reasons={signal.reasons[:3]}")
+        debug_info.append(f"signal:{signal.side.value} conf={signal.confidence:.3f} reasons={signal.reasons[:4]}")
 
         # Apply adaptive confidence threshold
         adaptive_threshold = self.learner.get_confidence_threshold()
@@ -745,34 +746,19 @@ class TradingAgent:
             )
 
     def _is_tradeable_session(self) -> bool:
-        """Determine if the market is tradeable based on ACTUAL conditions, not time of day.
-
-        Checks:
-        1. Must flatten before 3:10 PM CT (TopstepX rule) - this is the ONLY time check
-        2. Market quality: enough volume and movement to trade
-        3. Spread is reasonable (not holiday/maintenance gaps)
-        """
-        # Only hard rule: must flatten by 3:10 PM CT (4:10 PM ET)
+        """Check if conditions allow trading."""
+        # Only hard rule: must flatten by 3:10 PM CT
         if self.risk_mgr._is_near_flatten():
             return False
 
-        # Market quality check based on actual data, not clock
         if not self._current_indicators:
             return False
 
-        ind = self._current_indicators
-        flow = self._current_flow
-
-        # Need minimum ATR to show the market is moving
-        # Below 1.0 ATR = essentially dead, not worth trading
-        if ind.atr < 1.0:
+        # Need minimum ATR (market is actually moving)
+        if self._current_indicators.atr < 1.0:
             return False
 
-        # Need some volume flowing through
-        if flow and flow.total_volume_1m < 5:
-            return False
-
-        # Everything else: let the signal generator and risk manager decide
+        # That's it. Let the signal generator and risk manager decide everything else.
         return True
 
     def _log_state(self) -> None:
