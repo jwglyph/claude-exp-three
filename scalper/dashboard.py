@@ -7,11 +7,9 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from rich.console import Console
-from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
-from rich.text import Text
 from rich import box
 import numpy as np
 
@@ -20,408 +18,272 @@ from scalper.models import Side
 from scalper import __version__
 
 
-SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 BARS = "▁▂▃▄▅▆▇█"
+DIM = "[dim]"
+END = "[/]"
 
 
 def fp(p: float) -> str:
-    """Format price."""
     return f"{p:,.2f}" if p > 0 else "---"
 
-
 def fpnl(pnl: float) -> str:
-    """Format P&L with color."""
-    if pnl > 0:
-        return f"[bold green]+${pnl:,.2f}[/]"
-    elif pnl < 0:
-        return f"[bold red]-${abs(pnl):,.2f}[/]"
-    return "[dim]$0.00[/]"
+    if pnl > 0: return f"[bold green]+${pnl:,.2f}[/]"
+    elif pnl < 0: return f"[bold red]-${abs(pnl):,.2f}[/]"
+    return f"{DIM}$0.00{END}"
 
+def rc(regime: str) -> str:
+    return {"trending_up": "bold green", "trending_down": "bold red", "ranging": "yellow",
+            "volatile": "bold magenta", "low_volatility": "cyan"}.get(regime, "white")
 
-def regime_color(regime: str) -> str:
-    colors = {
-        "trending_up": "bold green",
-        "trending_down": "bold red",
-        "ranging": "yellow",
-        "volatile": "bold magenta",
-        "low_volatility": "cyan",
-    }
-    return colors.get(regime, "white")
-
-
-def rsi_color(rsi: float) -> str:
-    if rsi > 70:
-        return "red"
-    elif rsi < 30:
-        return "green"
-    return "white"
-
-
-def make_mini_chart(prices: list[float], width: int = 20) -> str:
-    """Make a tiny sparkline chart from recent prices."""
-    if len(prices) < 2:
-        return "[dim]waiting...[/]"
-    # Take last `width` prices
+def sparkline(prices: list[float], width: int = 20) -> str:
+    if len(prices) < 2: return f"{DIM}···{END}"
     p = prices[-width:]
     mn, mx = min(p), max(p)
     rng = mx - mn
-    if rng == 0:
-        return "▅" * len(p)
-    chars = []
-    for v in p:
-        idx = int((v - mn) / rng * (len(BARS) - 1))
-        chars.append(BARS[idx])
-    # Color based on direction
-    color = "green" if p[-1] >= p[0] else "red"
-    return f"[{color}]{''.join(chars)}[/]"
+    if rng == 0: return "▅" * len(p)
+    chars = [BARS[int((v - mn) / rng * 7)] for v in p]
+    c = "green" if p[-1] >= p[0] else "red"
+    return f"[{c}]{''.join(chars)}[/]"
+
+def bar(filled: int, total: int = 20, color: str = "white") -> str:
+    return f"[{color}]{'█' * filled}{'░' * (total - filled)}[/]"
+
+def tf_arrow(t: int) -> str:
+    if t > 0: return "[green]▲[/]"
+    elif t < 0: return "[red]▼[/]"
+    return f"{DIM}─{END}"
+
+def sep() -> str:
+    return f"  {DIM}{'─' * 72}{END}"
 
 
 def render_dashboard(agent: TradingAgent, feed_stats: dict, account_info: str, tick_counter: int) -> Panel:
-    """Render the full dashboard."""
-    status = agent.get_status()
-    risk = status["risk"]
-    pos = status["position"]
-    ind = status["indicators"]
-    adaptive = status.get("adaptive", {})
-    regime = status.get("regime", "unknown")
+    s = agent.get_status()
+    risk = s["risk"]
+    pos = s["position"]
+    ind = s["indicators"]
+    adaptive = s.get("adaptive", {})
+    regime = s.get("regime", "unknown")
     trades = agent.risk_mgr.trade_history
+    htf = s.get("htf", {})
+    of = s.get("orderflow", {})
+    scan = s.get("scan")
+    dr = s.get("dynamic_risk", {})
 
-    # Feed stats
+    last_price = feed_stats.get("last_price", 0)
+    connected = feed_stats.get("connected", False)
     quotes = feed_stats.get("quotes", 0)
     ftrades = feed_stats.get("trades", 0)
-    last_price = feed_stats.get("last_price", 0)
-    q_size = feed_stats.get("queue_size", 0)
-    connected = feed_stats.get("connected", False)
 
-    # Collect recent close prices for sparkline
     candles = agent.aggregator.get_candles()
-    recent_closes = [c.close for c in candles[-30:]] if candles else []
-    if last_price > 0:
-        recent_closes.append(last_price)
+    closes = [c.close for c in candles[-30:]] if candles else []
+    if last_price > 0: closes.append(last_price)
+    current = agent.aggregator.current_candle
 
-    # Spinner for liveness
-    spin = SPINNER[tick_counter % len(SPINNER)]
+    spin = SPIN[tick_counter % len(SPIN)]
     now_utc = datetime.now(timezone.utc)
-    now = now_utc.strftime("%H:%M:%S")
-    # Proper Pacific Time with DST handling
     try:
         import zoneinfo
-        ptz = zoneinfo.ZoneInfo("America/Los_Angeles")
-        pt = now_utc.astimezone(ptz).strftime("%H:%M:%S %Z")
+        pt = now_utc.astimezone(zoneinfo.ZoneInfo("America/Los_Angeles")).strftime("%H:%M %Z")
     except Exception:
         from datetime import timedelta
-        pt = (now_utc - timedelta(hours=7)).strftime("%H:%M:%S PDT")
+        pt = (now_utc - timedelta(hours=7)).strftime("%H:%M PDT")
 
-    # Build output
-    lines = []
+    L = []  # lines
 
-    # ── Header with price + sparkline ──
-    conn_icon = "[green]●[/]" if connected else "[red]●[/]"
-    price_str = f"[bold white]{fp(last_price)}[/]" if last_price > 0 else "[dim]waiting...[/]"
-    rc = regime_color(regime)
-    lines.append(
-        f"  {conn_icon} [bold cyan]NQ SCALPER[/]  {price_str}  "
-        f"[{rc}]{regime.upper()}[/]  "
-        f"{make_mini_chart(recent_closes)}  "
-        f"[dim]v{__version__} | {pt} / {now} UTC {spin}[/]"
-    )
+    # ═══════════════════════════════════════════════════════
+    # HEADER
+    # ═══════════════════════════════════════════════════════
+    icon = "[green]●[/]" if connected else "[red]●[/]"
+    price = f"[bold white]{fp(last_price)}[/]" if last_price > 0 else f"{DIM}---{END}"
+    regime_str = f"[{rc(regime)}]{regime.replace('_', ' ').upper()}[/]"
 
-    # ── Account + Market Status ──
-    if account_info:
-        try:
-            from scalper.market_hours import get_session_info
-            mkt = get_session_info()
-            if mkt["open"]:
-                mkt_str = f"[green]OPEN[/] ({mkt['session']})"
-            else:
-                mkt_str = f"[red]CLOSED[/] ({mkt['session']})"
-                if mkt.get("time_to_open"):
-                    mkt_str += f" opens in {mkt['time_to_open']}"
-            lines.append(f"  [dim]{account_info} | Market: {mkt_str}[/]")
-        except Exception:
-            lines.append(f"  [dim]{account_info}[/]")
+    L.append(f"  {icon} [bold cyan]NQ[/] {price}  {regime_str}  {sparkline(closes)}  {DIM}v{__version__} {pt} {spin}{END}")
 
-    lines.append("")
+    # Account + market
+    try:
+        from scalper.market_hours import get_session_info
+        mkt = get_session_info()
+        mkt_s = f"[green]●{END} {mkt['session']}" if mkt["open"] else f"[red]●{END} {mkt['session']}"
+        if mkt.get("time_to_open"): mkt_s += f" opens {mkt['time_to_open']}"
+    except Exception:
+        mkt_s = ""
+    L.append(f"  {DIM}{account_info}  {mkt_s}{END}")
 
-    # ── Current Candle Building ──
-    current = agent.aggregator.current_candle
+    L.append(sep())
+
+    # ═══════════════════════════════════════════════════════
+    # CANDLE + HTF + LIVE SIGNALS
+    # ═══════════════════════════════════════════════════════
     if current:
         elapsed = time.time() - current.timestamp
-        bar_pct = min(elapsed / agent.config.candle_interval_sec, 1.0)
-        bar_filled = int(bar_pct * 20)
-        bar = "█" * bar_filled + "░" * (20 - bar_filled)
-        candle_dir = "[green]▲[/]" if current.is_bullish else "[red]▼[/]" if current.is_bearish else "[dim]─[/]"
-        lines.append(
-            f"  Building: [{bar}] {bar_pct:.0%}  "
-            f"{candle_dir} O={current.open:.2f} H={current.high:.2f} L={current.low:.2f} C={current.close:.2f}  "
-            f"V={current.volume} Δ={current.delta:+d}"
+        pct = min(elapsed / agent.config.candle_interval_sec, 1.0)
+        filled = int(pct * 15)
+        c_bar = bar(filled, 15, "cyan")
+        c_dir = "[green]▲[/]" if current.is_bullish else "[red]▼[/]" if current.is_bearish else "─"
+        L.append(
+            f"  Candle [{c_bar}] {pct:.0%}  {c_dir} "
+            f"O {current.open:.2f}  H {current.high:.2f}  L {current.low:.2f}  C {current.close:.2f}  "
+            f"V {current.volume}  Δ {current.delta:+d}"
         )
     else:
-        lines.append("  [dim]Waiting for first tick...[/]")
+        L.append(f"  {DIM}Waiting for tick data...{END}")
 
-    # ── HTF Confluence ──
-    htf = status.get("htf", {})
+    # HTF + Flow on one line
+    htf_parts = []
     if htf:
-        def tf_arrow(t):
-            if t > 0: return "[green]▲[/]"
-            elif t < 0: return "[red]▼[/]"
-            return "[dim]─[/]"
-
-        htf_line = (
-            f"  HTF: 5m{tf_arrow(htf.get('5m', 0))} "
-            f"15m{tf_arrow(htf.get('15m', 0))} "
-            f"1h{tf_arrow(htf.get('1h', 0))}  "
-        )
+        htf_parts.append(f"HTF: 5m{tf_arrow(htf.get('5m',0))} 15m{tf_arrow(htf.get('15m',0))} 1h{tf_arrow(htf.get('1h',0))}")
         agrees = htf.get("agrees", "neutral")
-        if agrees == "long":
-            htf_line += "[green]BULLISH BIAS[/]"
-        elif agrees == "short":
-            htf_line += "[red]BEARISH BIAS[/]"
-        else:
-            htf_line += "[dim]NEUTRAL[/]"
-        htf_line += f"  str={htf.get('strength', 0):.0%}"
-        lines.append(htf_line)
+        if agrees == "long": htf_parts.append("[green]BULL[/]")
+        elif agrees == "short": htf_parts.append("[red]BEAR[/]")
+        else: htf_parts.append(f"{DIM}NEUTRAL{END}")
+    if of:
+        fb = of.get("flow_bias", 0)
+        fb_c = "green" if fb > 0.1 else "red" if fb < -0.1 else "dim"
+        d1m = of.get("delta_1m", 0)
+        d1c = "green" if d1m > 0 else "red" if d1m < 0 else "dim"
+        bt, st = of.get("buy_trades", 0), of.get("sell_trades", 0)
+        htf_parts.append(f"Flow:[{fb_c}]{fb:+.2f}[/]")
+        htf_parts.append(f"Δ:[{d1c}]{d1m:+d}[/]")
+        htf_parts.append(f"{DIM}{bt}B/{st}S{END}")
+        abs_v = of.get("absorption", 0)
+        if abs(abs_v) > 0.1:
+            ac = "green" if abs_v > 0 else "red"
+            htf_parts.append(f"[{ac}]absorb{abs_v:+.1f}[/]")
+    if htf_parts:
+        L.append(f"  {DIM}│{END} {'  '.join(htf_parts)}")
 
-    # ── Tick Events ──
-    tick_evt = status.get("tick_event")
-    if tick_evt and tick_evt.get("age", 999) < 30:
-        evt_color = "green" if tick_evt["dir"] > 0 else "red"
-        lines.append(
-            f"  [{evt_color}]⚡ {tick_evt['type'].upper()}: {tick_evt['desc']}[/] "
-            f"[dim]({tick_evt['age']:.0f}s ago)[/]"
-        )
+    # Live tick events
+    tick_evt = s.get("tick_event")
+    if tick_evt and tick_evt.get("age", 999) < 20:
+        ec = "green" if tick_evt["dir"] > 0 else "red"
+        L.append(f"  [{ec}]⚡ {tick_evt['type'].upper()}: {tick_evt['desc']}[/] {DIM}({tick_evt['age']:.0f}s ago){END}")
 
-    # ── Signal Scan (what the agent is seeing) ──
-    # ── Signal Scan (1m candle close analysis) ──
-    scan = status.get("scan")
+    L.append(sep())
+
+    # ═══════════════════════════════════════════════════════
+    # SIGNAL ANALYSIS
+    # ═══════════════════════════════════════════════════════
     if scan:
         bs = scan.get("bull_score", 0)
         ss = scan.get("bear_score", 0)
-        bull_factors = scan.get("bull", [])
-        bear_factors = scan.get("bear", [])
+        bull_f = scan.get("bull", [])
+        bear_f = scan.get("bear", [])
 
-        if bull_factors:
-            bull_parts = [f"[green]{name}[/][dim]({w:.2f})[/]" for name, w in bull_factors[:6]]
-            lines.append(f"  [green]▲ BULL {bs:.2f}[/]: {' '.join(bull_parts)}")
-        if bear_factors:
-            bear_parts = [f"[red]{name}[/][dim]({w:.2f})[/]" for name, w in bear_factors[:6]]
-            lines.append(f"  [red]▼ BEAR {ss:.2f}[/]: {' '.join(bear_parts)}")
-
-        if bs + ss > 0:
+        # Confidence
+        total = bs + ss
+        if total > 0:
             net = bs - ss
-            total = bs + ss
-            dominant = max(bs, ss)
-            sep = abs(net) / total
-            conf = sep * 0.5 + dominant * 0.5
-            verdict_side = "[green]LONG[/]" if net > 0 else "[red]SHORT[/]"
-            conf_color = "green" if conf >= 0.50 else "yellow" if conf >= 0.35 else "dim"
-            lines.append(f"  Net: {verdict_side} [{conf_color}]conf={conf:.2f}[/] (need 0.50) [dim](updates on 1m close)[/]")
+            conf = (abs(net) / total) * 0.5 + max(bs, ss) * 0.5
+            side_str = "[green]▲ LONG[/]" if net > 0 else "[red]▼ SHORT[/]"
+            cc = "green" if conf >= 0.50 else "yellow" if conf >= 0.35 else "dim"
+            # Confidence bar
+            cf = int(min(conf, 1.0) * 15)
+            cb = bar(cf, 15, cc)
+            L.append(f"  Signal: {side_str}  [{cb}] [{cc}]{conf:.0%}[/]  {DIM}need 50%{END}")
 
-    # ── Intra-candle monitoring ──
-    intra_parts = []
-
-    # Show tick analyzer status
-    tick_evt = status.get("tick_event")
-    if tick_evt and tick_evt.get("age", 999) < 30:
-        evt_color = "green" if tick_evt["dir"] > 0 else "red"
-        intra_parts.append(f"[{evt_color}]⚡{tick_evt['type']}:{tick_evt['desc']}[/] ({tick_evt['age']:.0f}s)")
-
-    # Current candle direction + delta as real-time signal
-    if current:
-        candle_move = current.close - current.open
-        if abs(candle_move) > 0:
-            c_dir = "[green]▲[/]" if candle_move > 0 else "[red]▼[/]"
-            intra_parts.append(f"candle:{c_dir}{abs(candle_move):.1f}pts")
-        if current.delta != 0:
-            d_color = "green" if current.delta > 0 else "red"
-            intra_parts.append(f"Δ:[{d_color}]{current.delta:+d}[/]")
-
-    # Flow direction as real-time signal
-    of = status.get("orderflow", {})
-    fb = of.get("flow_bias", 0)
-    if abs(fb) > 0.1:
-        f_color = "green" if fb > 0 else "red"
-        f_dir = "buying" if fb > 0 else "selling"
-        intra_parts.append(f"flow:[{f_color}]{f_dir}[/]")
-
-    if intra_parts:
-        lines.append(f"  [dim]Live:[/] {' | '.join(intra_parts)}")
-
-    lines.append("")
-
-    # ── Position ──
-    if pos["side"]:
-        side_color = "green" if pos["side"] == "long" else "red"
-        arrow = "▲" if pos["side"] == "long" else "▼"
-        lines.append(
-            f"  [{side_color}]{arrow} {pos['side'].upper()}[/] @ {fp(pos['entry'])}  "
-            f"P&L: {fpnl(pos['pnl'])}  "
-            f"Stop: {fp(pos['stop'] or 0)}  Target: {fp(pos['target'] or 0)}"
-        )
-        trail = pos.get("trail")
-        if trail and trail > 0:
-            lines[-1] += f"  Trail: {fp(trail)}"
+        # Factors as compact tags
+        if bull_f:
+            tags = " ".join(f"[green]{n}[/]" for n, w in bull_f[:5])
+            L.append(f"  [green]▲[/] {DIM}{bs:.2f}{END}  {tags}")
+        if bear_f:
+            tags = " ".join(f"[red]{n}[/]" for n, w in bear_f[:5])
+            L.append(f"  [red]▼[/] {DIM}{ss:.2f}{END}  {tags}")
     else:
-        lines.append("  [dim]● FLAT — scanning for entry...[/]")
+        L.append(f"  {DIM}Signal: warming up...{END}")
 
-    lines.append("")
+    L.append(sep())
 
-    # ── Risk Bar ──
-    daily_pnl = risk["daily_pnl"]
+    # ═══════════════════════════════════════════════════════
+    # POSITION
+    # ═══════════════════════════════════════════════════════
+    if pos["side"]:
+        sc = "green" if pos["side"] == "long" else "red"
+        arrow = "▲" if pos["side"] == "long" else "▼"
+        trail_str = f"  Trail: {fp(pos['trail'])}" if pos.get("trail") and pos["trail"] > 0 else ""
+        L.append(
+            f"  [{sc}]{arrow} {pos['side'].upper()}[/] @ {fp(pos['entry'])}  "
+            f"P&L: {fpnl(pos['pnl'])}  "
+            f"Stop: {fp(pos['stop'] or 0)}  Target: {fp(pos['target'] or 0)}{trail_str}"
+        )
+    else:
+        L.append(f"  {DIM}○ FLAT — scanning...{END}")
+
+    # ═══════════════════════════════════════════════════════
+    # RISK + INDICATORS (compact)
+    # ═══════════════════════════════════════════════════════
     dd_rem = risk["drawdown_remaining"]
     dd_max = agent.config.max_drawdown
     dd_pct = (dd_max - dd_rem) / dd_max if dd_max > 0 else 0
-    dd_bar_filled = int(dd_pct * 20)
-    dd_color = "green" if dd_pct < 0.3 else "yellow" if dd_pct < 0.6 else "red"
-    dd_bar = f"[{dd_color}]{'█' * dd_bar_filled}[/][dim]{'░' * (20 - dd_bar_filled)}[/]"
-    lock_str = " [bold red]⊘ LOCKED[/]" if risk["is_locked"] else ""
+    dc = "green" if dd_pct < 0.3 else "yellow" if dd_pct < 0.6 else "red"
+    dd_b = bar(int(dd_pct * 12), 12, dc)
 
-    lines.append(
-        f"  P&L: {fpnl(daily_pnl)}  "
-        f"DD: [{dd_bar}] ${dd_rem:,.0f} left  "
-        f"Risk: x{risk['risk_multiplier']:.1f}  "
-        f"Losses: {risk['consecutive_losses']}"
-        f"{lock_str}"
-    )
-
-    lines.append("")
-
-    # ── Indicators ──
     rsi = ind["rsi"]
-    rsi_c = rsi_color(rsi)
-    # RSI visual bar
-    rsi_pos = int(rsi / 100 * 20)
-    rsi_bar = "░" * rsi_pos + "█" + "░" * (20 - rsi_pos)
+    rsi_c = "red" if rsi > 70 else "green" if rsi < 30 else "white"
 
-    lines.append(
-        f"  EMA: {fp(ind['ema_fast'])}/{fp(ind['ema_slow'])}  "
-        f"RSI: [{rsi_c}]{rsi:.0f}[/] [{rsi_c}][{rsi_bar}][/]  "
-        f"ATR: {ind['atr']:.2f}  "
-        f"VWAP: {fp(ind['vwap'])}"
+    L.append(
+        f"  P&L {fpnl(risk['daily_pnl'])}  DD [{dd_b}] ${dd_rem:,.0f}  "
+        f"Risk x{risk['risk_multiplier']:.1f}  "
+        f"RSI [{rsi_c}]{rsi:.0f}[/]  ATR {ind['atr']:.1f}  "
+        f"EMA {fp(ind['ema_fast'])}/{fp(ind['ema_slow'])}"
     )
 
-    # ── Dynamic Risk / Edge ──
-    dr = status.get("dynamic_risk", {})
+    # Edge (if we have data)
     if dr and dr.get("sample_size", 0) > 0:
-        kelly = dr.get("kelly_pct", 0)
         edge = dr.get("edge_per_dollar", 0)
-        edge_c = "green" if edge > 0 else "red" if edge < 0 else "dim"
-        lines.append(
-            f"  Edge: [{edge_c}]${edge:.2f}/$ risked[/]  "
-            f"Kelly: {kelly:.1f}%  "
-            f"WR: {dr.get('win_rate', 0):.0%}  "
-            f"Payoff: {dr.get('payoff_ratio', 0):.1f}:1  "
-            f"[dim]({dr.get('sample_size', 0)} trades, {dr.get('confidence', 0):.0%} conf)[/]"
+        ec = "green" if edge > 0 else "red"
+        L.append(
+            f"  {DIM}Edge:[/] [{ec}]${edge:.2f}/$ risked[/]  "
+            f"Kelly {dr.get('kelly_pct',0):.1f}%  "
+            f"WR {dr.get('win_rate',0):.0%}  "
+            f"Payoff {dr.get('payoff_ratio',0):.1f}:1  "
+            f"{DIM}({dr.get('sample_size',0)} trades){END}"
         )
 
-    # ── Order Flow ──
-    of = status.get("orderflow", {})
-    if of:
-        d1m = of.get("delta_1m", 0)
-        d5m = of.get("delta_5m", 0)
-        fb = of.get("flow_bias", 0)
-        fb_c = "green" if fb > 0.15 else "red" if fb < -0.15 else "dim"
-        d1m_c = "green" if d1m > 0 else "red" if d1m < 0 else "dim"
+    L.append(sep())
 
-        # Delta bar visualization
-        delta_bar_pos = int(np.clip((fb + 1) / 2, 0, 1) * 20)
-        delta_bar = "░" * delta_bar_pos + "█" + "░" * (20 - delta_bar_pos)
-
-        bt = of.get("buy_trades", 0)
-        st = of.get("sell_trades", 0)
-
-        flow_parts = [
-            f"  Flow: [{fb_c}][{delta_bar}][/] [{fb_c}]{fb:+.2f}[/]",
-            f"Δ1m:[{d1m_c}]{d1m:+d}[/]",
-            f"Δ5m:{d5m:+d}",
-            f"[dim]{bt}B/{st}S[/]",
-        ]
-
-        abs_val = of.get("absorption", 0)
-        if abs(abs_val) > 0.1:
-            abs_c = "green" if abs_val > 0 else "red"
-            flow_parts.append(f"[{abs_c}]absorb:{abs_val:+.1f}[/]")
-
-        lg_b = of.get("large_buy", 0)
-        lg_s = of.get("large_sell", 0)
-        if lg_b + lg_s > 0:
-            flow_parts.append(f"lg:{lg_b}B/{lg_s}S")
-
-        stk_b = of.get("stacked_buy", 0)
-        stk_s = of.get("stacked_sell", 0)
-        if stk_b >= 3 and stk_b <= 12:  # cap display, >12 is likely noise
-            flow_parts.append(f"[green]stacked:{stk_b}B[/]")
-        if stk_s >= 3 and stk_s <= 12:
-            flow_parts.append(f"[red]stacked:{stk_s}S[/]")
-
-        lines.append("  ".join(flow_parts))
-
-    lines.append("")
-
-    # ── Stats ──
-    candle_count = status["candles"]
-    signals = status["signals"]
-    trade_count = status["trades"]
-    wr = agent.risk_mgr.win_rate
-    conf = adaptive.get("confidence_threshold", 0.55)
-
-    balance = risk.get("balance", 0)
-    max_ct = risk.get("max_contracts", 2)
-    intra = status.get("intra_candle_trades", 0)
-
-    lines.append(
-        f"  [dim]Bal: ${balance:,.0f} | Max: {max_ct}ct | "
-        f"Candles: {candle_count} | Sig: {signals} | Trades: {trade_count}"
-        f"{'(' + str(intra) + ' intra)' if intra else ''} | "
-        f"Win: {wr:.0%} | Conf: {conf:.2f} | "
-        f"Feed: {quotes}q/{ftrades}t[/]"
-    )
-
-    # ── Recent Trades ──
+    # ═══════════════════════════════════════════════════════
+    # TRADE LOG
+    # ═══════════════════════════════════════════════════════
     if trades:
-        lines.append("")
-        lines.append("  [bold]Trade Log:[/]")
-
-        header = f"  [dim]{'#':>3}  {'Side':>5}  {'Entry':>10}  {'Exit':>10}  {'P&L':>8}  {'Regime':<14}  {'Reason':<15}[/]"
-        lines.append(header)
-
-        for i, t in enumerate(trades[-6:], max(1, len(trades) - 5)):
-            side_c = "green" if t.side == Side.LONG else "red"
-            pnl_c = "green" if t.pnl >= 0 else "red"
-            lines.append(
-                f"  {i:3d}  [{side_c}]{t.side.value.upper():>5}[/]  "
+        L.append(f"  {DIM}{'#':>3}  {'Side':>5}  {'Entry':>10}  {'Exit':>10}  {'P&L':>8}  {'Reason':<15}{END}")
+        for i, t in enumerate(trades[-5:], max(1, len(trades) - 4)):
+            sc = "green" if t.side == Side.LONG else "red"
+            pc = "green" if t.pnl >= 0 else "red"
+            L.append(
+                f"  {i:3d}  [{sc}]{t.side.value.upper():>5}[/]  "
                 f"{t.entry_price:10,.2f}  {t.exit_price:10,.2f}  "
-                f"[{pnl_c}]${t.pnl:+7,.0f}[/]  "
-                f"{t.regime.value:<14}  {t.exit_reason:<15}"
+                f"[{pc}]${t.pnl:+7,.0f}[/]  {t.exit_reason:<15}"
             )
 
-    # ── Regime Stats ──
-    regime_stats = adaptive.get("regime_stats", {})
-    if regime_stats:
-        lines.append("")
-        parts = []
-        for r, s in regime_stats.items():
-            if s["trades"] > 0:
-                wr_c = "green" if s["win_rate"] > 0.5 else "red"
-                parts.append(f"{r}:[{wr_c}]{s['win_rate']:.0%}[/]({s['trades']})")
-        if parts:
-            lines.append("  [dim]" + " | ".join(parts) + "[/]")
+    # ═══════════════════════════════════════════════════════
+    # FOOTER
+    # ═══════════════════════════════════════════════════════
+    balance = risk.get("balance", 0)
+    max_ct = risk.get("max_contracts", 2)
+    wr = agent.risk_mgr.win_rate
+    trade_count = s["trades"]
+    candle_count = s["candles"]
+    signals = s["signals"]
 
-    content = "\n".join(lines)
+    L.append(
+        f"  {DIM}Bal ${balance:,.0f} | {max_ct}ct | "
+        f"{candle_count}candles {signals}sig {trade_count}trades | "
+        f"WR {wr:.0%} | Feed {quotes}q/{ftrades}t{END}"
+    )
 
     border = "green" if connected else "red"
     return Panel(
-        content,
-        title=f"[bold] NQ Adaptive Scalper [/]",
-        subtitle="[dim]Ctrl+C to stop[/]",
+        "\n".join(L),
+        title="[bold] NQ Adaptive Scalper [/]",
+        subtitle=f"{DIM}Ctrl+C to stop{END}",
         border_style=border,
         padding=(0, 0),
     )
 
 
 class LiveDashboard:
-    """Runs the Rich live display alongside the agent."""
-
     def __init__(self, agent: TradingAgent, feed_stats_fn, account_info: str = ""):
         self.agent = agent
         self.feed_stats_fn = feed_stats_fn
@@ -431,5 +293,4 @@ class LiveDashboard:
 
     def render(self):
         self._tick += 1
-        stats = self.feed_stats_fn()
-        return render_dashboard(self.agent, stats, self.account_info, self._tick)
+        return render_dashboard(self.agent, self.feed_stats_fn(), self.account_info, self._tick)

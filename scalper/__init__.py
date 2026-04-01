@@ -1,9 +1,9 @@
 """NQ Adaptive 1-Minute Candle Scalper for TopstepX."""
 
-__version__ = "0.20.1"
+__version__ = "0.21.0"
 
 # Version changelog:
-# 0.20.1 - Split display: 1m candle-close factors + live intra-candle monitoring
+# 0.21.0 - Dashboard redesign: clean visual hierarchy, compact layout, confidence bar
 # 0.20.0 - Live signal scan: shows bull/bear factors + weights + confidence in dashboard
 # 0.19.0 - Lower confidence threshold 0.60→0.50. Scoring data showed max 0.547, need 0.50 to trade
 # 0.18.1 - Signal gen always returns signal with confidence, agent filters. Shows raw scores in debug
