@@ -1,8 +1,9 @@
 """NQ Adaptive 1-Minute Candle Scalper for TopstepX."""
 
-__version__ = "0.21.0"
+__version__ = "0.21.1"
 
 # Version changelog:
+# 0.21.1 - Lower threshold 0.50→0.45. Data shows 4-factor signals peak at 0.495
 # 0.21.0 - Dashboard redesign: clean visual hierarchy, compact layout, confidence bar
 # 0.20.0 - Live signal scan: shows bull/bear factors + weights + confidence in dashboard
 # 0.19.0 - Lower confidence threshold 0.60→0.50. Scoring data showed max 0.547, need 0.50 to trade

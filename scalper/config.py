@@ -157,7 +157,7 @@ class ScalperConfig(BaseSettings):
     volume_profile_enabled: bool = Field(default=True)
 
     # --- Confidence ---
-    min_confidence: float = Field(default=0.50, description="Threshold calibrated to actual scoring range")
+    min_confidence: float = Field(default=0.45, description="Calibrated: 3+ factors = ~0.45-0.55 range")
     high_confidence: float = Field(default=0.75, description="Allows larger size / risk")
 
     # --- Market quality (replaces time-based session filters) ---
