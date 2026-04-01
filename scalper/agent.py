@@ -415,15 +415,14 @@ class TradingAgent:
             self._write_signal_debug(debug_info)
             return
 
-        # Generate 1m signal
+        # Generate 1m signal (always returns a signal if any factors present)
         signal = self.signal_gen.generate(candles, indicators, regime)
         if signal is None:
-            # Log what the signal gen actually computed
-            debug_info.append(f"no_signal(min_conf={self.config.min_confidence})")
+            debug_info.append("no_factors")
             self._write_signal_debug(debug_info)
             return
 
-        debug_info.append(f"signal:{signal.side.value} conf={signal.confidence:.3f} reasons={signal.reasons[:4]}")
+        debug_info.append(f"raw:{signal.side.value} conf={signal.confidence:.3f} reasons={signal.reasons[:4]}")
 
         # Apply adaptive confidence threshold
         adaptive_threshold = self.learner.get_confidence_threshold()

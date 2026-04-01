@@ -99,7 +99,8 @@ class SignalGenerator:
         confidence = self._adjust_confidence(confidence, regime, indicators)
 
         # Determine signal type and side
-        if net > 0 and confidence >= self.config.min_confidence:
+        # ALWAYS return the signal - let the agent decide threshold
+        if net > 0:
             side = Side.LONG
             reasons = bull_reasons
             if confidence >= 0.75:
@@ -108,7 +109,7 @@ class SignalGenerator:
                 sig_type = SignalType.LONG
             else:
                 sig_type = SignalType.WEAK_LONG
-        elif net < 0 and confidence >= self.config.min_confidence:
+        elif net < 0:
             side = Side.SHORT
             reasons = bear_reasons
             if confidence >= 0.75:

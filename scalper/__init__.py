@@ -1,8 +1,9 @@
 """NQ Adaptive 1-Minute Candle Scalper for TopstepX."""
 
-__version__ = "0.18.0"
+__version__ = "0.18.1"
 
 # Version changelog:
+# 0.18.1 - Signal gen always returns signal with confidence, agent filters. Shows raw scores in debug
 # 0.18.0 - Fix: confidence formula was broken (0.14 max), removed volume gate from session check
 # 0.17.1 - Debug: log signal evaluation to logs/signal_debug.txt every 10 candles
 # 0.17.0 - 24/7 mode: auto-reconnect, market hours sleep/wake, error resilience
