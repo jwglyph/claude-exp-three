@@ -365,9 +365,11 @@ class TradingAgent:
 
         candles = self.aggregator.get_candles()
         if len(candles) < self.config.warmup_candles:
+            self._write_signal_debug([f"warmup:{len(candles)}/{self.config.warmup_candles}"])
             return
 
         if not self._is_tradeable_session():
+            self._write_signal_debug(["blocked:not_tradeable_session"])
             return
 
         # 1. Compute 1m indicators
@@ -727,9 +729,7 @@ class TradingAgent:
         )
 
     def _write_signal_debug(self, info: list[str]) -> None:
-        """Write signal evaluation debug to file (every 10th candle to avoid spam)."""
-        if self._candle_count % 10 != 0:
-            return
+        """Write signal evaluation debug to file."""
         import pathlib
         f = pathlib.Path("logs/signal_debug.txt")
         f.parent.mkdir(exist_ok=True)
