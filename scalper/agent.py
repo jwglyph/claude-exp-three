@@ -482,16 +482,20 @@ class TradingAgent:
 
         # Check R:R ratio
         if signal.rr_ratio < self.config.min_rr_ratio:
+            debug_info.append(f"rr_too_low:{signal.rr_ratio:.2f}<{self.config.min_rr_ratio}")
             self.journal.log_signal(signal, taken=False, skip_reason="rr_too_low")
+            self._write_signal_debug(debug_info)
             return
 
         # Dynamic risk: should we trade at all?
         should, reason = self.dynamic_risk.should_trade(self.risk_mgr.state.trailing_drawdown_remaining)
         if not should:
+            debug_info.append(f"dynamic_blocked:{reason}")
             self.journal.log_signal(signal, taken=False, skip_reason=f"dynamic:{reason}")
+            self._write_signal_debug(debug_info)
             return
 
-        # Dynamic position sizing (Kelly-based when enough data, conservative otherwise)
+        # Dynamic position sizing
         regime_quality = self.learner.get_regime_weight(regime.regime)
         optimal_risk = self.dynamic_risk.optimal_risk_dollars(
             remaining_drawdown=self.risk_mgr.state.trailing_drawdown_remaining,
@@ -503,9 +507,12 @@ class TradingAgent:
         stop_distance = abs(signal.entry_price - signal.stop_price)
         per_contract_risk = stop_distance * self.config.point_value + self.config.commission_rt
         if per_contract_risk <= 0:
+            debug_info.append("per_contract_risk_zero")
+            self._write_signal_debug(debug_info)
             return
 
         size = max(1, int(optimal_risk / per_contract_risk))
+        debug_info.append(f"sizing:risk=${optimal_risk:.0f} stop={stop_distance:.1f}pts cost=${per_contract_risk:.0f}/ct size={size}")
 
         # Cap by scaling plan
         size = min(size, self.risk_mgr.get_max_contracts())
@@ -515,6 +522,8 @@ class TradingAgent:
         self.journal.log_signal(signal, taken=True, size=size, htf_confluence=htf_info)
 
         # Execute entry
+        debug_info.append(f"EXECUTING size={size}")
+        self._write_signal_debug(debug_info)
         self._signal_count += 1
         self._last_signal_reasons = signal.reasons
         asyncio.get_event_loop().create_task(

@@ -1,8 +1,9 @@
 """NQ Adaptive 1-Minute Candle Scalper for TopstepX."""
 
-__version__ = "0.21.1"
+__version__ = "0.21.2"
 
 # Version changelog:
+# 0.21.2 - Debug every gate: RR check, dynamic risk, sizing all logged now
 # 0.21.1 - Lower threshold 0.50→0.45. Data shows 4-factor signals peak at 0.495
 # 0.21.0 - Dashboard redesign: clean visual hierarchy, compact layout, confidence bar
 # 0.20.0 - Live signal scan: shows bull/bear factors + weights + confidence in dashboard
